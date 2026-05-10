@@ -1,11 +1,11 @@
-'use strict';
+"use strict";
 
-const { Server }   = require('socket.io');
-const { createAdapter } = require('@socket.io/redis-adapter');
-const { createClient }  = require('redis');
-const jwt          = require('jsonwebtoken');
-const config       = require('./config');
-const logger       = require('./logger');
+const { Server } = require("socket.io");
+const { createAdapter } = require("@socket.io/redis-adapter");
+const { createClient } = require("redis");
+const jwt = require("jsonwebtoken");
+const config = require("./config");
+const logger = require("./logger");
 
 let io;
 
@@ -22,25 +22,27 @@ async function init(httpServer) {
   // ── Auth middleware ───────────────────────────────────────
   io.use((socket, next) => {
     try {
-      const token   = socket.handshake.auth?.token;
-      if (!token) return next(new Error('No token'));
+      const token = socket.handshake.auth?.token;
+      if (!token) return next(new Error("No token"));
       const decoded = jwt.verify(token, config.app.jwtSecret);
-      socket.userId   = decoded.user_id;
+      socket.userId = decoded.user_id;
       socket.business = decoded.current_business;
-      socket.roleId   = decoded.role_id;
+      socket.roleId = decoded.role_id;
       next();
     } catch {
-      next(new Error('Invalid token'));
+      next(new Error("Invalid token"));
     }
   });
 
-  io.on('connection', socket => {
+  io.on("connection", (socket) => {
     // Join personal room and business room
     socket.join(`user:${socket.userId}`);
     socket.join(`business:${socket.business}`);
-    logger.debug(`Socket connected: user=${socket.userId} business=${socket.business}`);
+    logger.debug(
+      `Socket connected: user=${socket.userId} business=${socket.business}`,
+    );
 
-    socket.on('switch_business', (business) => {
+    socket.on("switch_business", (business) => {
       if (config.app.businesses.includes(business)) {
         socket.leave(`business:${socket.business}`);
         socket.business = business;
@@ -48,12 +50,12 @@ async function init(httpServer) {
       }
     });
 
-    socket.on('disconnect', () => {
+    socket.on("disconnect", () => {
       logger.debug(`Socket disconnected: user=${socket.userId}`);
     });
   });
 
-  logger.info('Socket.io initialised with Redis adapter');
+  logger.info("Socket.io initialised with Redis adapter");
 }
 
 // ── Emit helpers ──────────────────────────────────────────
