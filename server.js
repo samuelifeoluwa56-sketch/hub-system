@@ -1,0 +1,41 @@
+'use strict';
+
+const app         = require('./app');
+const config      = require('./config/config');
+const { shutdown: dbShutdown } = require('./config/db');
+const { shutdown: redisShutdown } = require('./config/redis');
+const { init: initSockets } = require('./config/sockets');
+const logger      = require('./config/logger');
+const jobRunner   = require('./jobs/index');
+const http        = require('http');
+
+const server = http.createServer(app);
+
+initSockets(server);
+jobRunner.start();
+
+server.listen(config.app.port, () => {
+  logger.info(`Hub server running on port ${config.app.port} [${config.app.env}]`);
+});
+
+async function shutdown(signal) {
+  logger.info(`${signal} received — shutting down gracefully`);
+  jobRunner.stop();
+  server.close(async () => {
+    try {
+      await dbShutdown();
+      await redisShutdown();
+      logger.info('All connections closed.');
+      process.exit(0);
+    } catch (err) {
+      logger.error('Shutdown error', err);
+      process.exit(1);
+    }
+  });
+  setTimeout(() => process.exit(1), 10_000);
+}
+
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException',  err => { logger.error('Uncaught exception',  err); shutdown('uncaughtException');  });
+process.on('unhandledRejection', err => { logger.error('Unhandled rejection', err); shutdown('unhandledRejection'); });
