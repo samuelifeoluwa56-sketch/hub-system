@@ -6,33 +6,34 @@
 //   node migrate.js verify    — check table counts per schema
 // ============================================================
 
-const { Client } = require('pg');
-const fs         = require('fs');
-const path       = require('path');
-const crypto     = require('crypto');
+const { Client } = require("pg");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
 
 // ── Config ────────────────────────────────────────────────
 // Copy .env.example to .env and fill in your values
-require('dotenv').config();
+require("dotenv").config();
 
 const DB_CONFIG = {
-  host:     process.env.PG_HOST     || 'localhost',
-  port:     parseInt(process.env.PG_PORT || '5432'),
-  database: process.env.PG_DATABASE || 'hub_db',
-  user:     process.env.PG_USER     || 'postgres',
-  password: process.env.PG_PASSWORD || '',
+  host: process.env.PG_HOST || "localhost",
+  port: parseInt(process.env.PG_PORT || "5432"),
+  database: process.env.PG_DATABASE || "hub_db",
+  user: process.env.PG_USER || "postgres",
+  password: process.env.PG_PASSWORD || "",
 };
 
-const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
+const MIGRATIONS_DIR = path.join(__dirname, "migrations");
 
 // ── Helpers ───────────────────────────────────────────────
 function sha256(content) {
-  return crypto.createHash('sha256').update(content).digest('hex');
+  return crypto.createHash("sha256").update(content).digest("hex");
 }
 
 function getMigrationFiles() {
-  return fs.readdirSync(MIGRATIONS_DIR)
-    .filter(f => f.endsWith('.sql'))
+  return fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
     .sort();
 }
 
@@ -45,16 +46,18 @@ async function ensureMigrationsTable(client) {
       SELECT 1 FROM shared.migrations LIMIT 1
     `);
   } catch {
-    console.log('  shared.migrations table not yet created — first run detected');
+    console.log(
+      "  shared.migrations table not yet created — first run detected",
+    );
   }
 }
 
 async function getAppliedMigrations(client) {
   try {
     const result = await client.query(
-      `SELECT filename, applied_at, status FROM shared.migrations ORDER BY applied_at`
+      `SELECT filename, applied_at, status FROM shared.migrations ORDER BY applied_at`,
     );
-    return new Set(result.rows.map(r => r.filename));
+    return new Set(result.rows.map((r) => r.filename));
   } catch {
     return new Set();
   }
@@ -62,14 +65,14 @@ async function getAppliedMigrations(client) {
 
 async function runMigration(client, filename) {
   const filepath = path.join(MIGRATIONS_DIR, filename);
-  const content  = fs.readFileSync(filepath, 'utf8');
+  const content = fs.readFileSync(filepath, "utf8");
   const checksum = sha256(content);
-  const start    = Date.now();
+  const start = Date.now();
 
   console.log(`\n  → Applying: ${filename}`);
 
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
     await client.query(content);
 
     // Record the migration (table may not exist for first migration)
@@ -78,16 +81,21 @@ async function runMigration(client, filename) {
         `INSERT INTO shared.migrations (filename, applied_by, checksum, execution_ms, status)
          VALUES ($1, $2, $3, $4, 'applied')
          ON CONFLICT (filename) DO UPDATE SET status = 'applied', applied_at = now()`,
-        [filename, process.env.HOSTNAME || 'local', checksum, Date.now() - start]
+        [
+          filename,
+          process.env.HOSTNAME || "local",
+          checksum,
+          Date.now() - start,
+        ],
       );
     } catch {
       // Table doesn't exist yet — first migration creates it
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     console.log(`  ✓ Done in ${Date.now() - start}ms`);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     console.error(`  ✗ FAILED: ${err.message}`);
     throw err;
   }
@@ -97,15 +105,17 @@ async function runMigration(client, filename) {
 async function runMigrations() {
   const client = new Client(DB_CONFIG);
   await client.connect();
-  console.log(`\nConnected to: ${DB_CONFIG.host}:${DB_CONFIG.port}/${DB_CONFIG.database}`);
+  console.log(
+    `\nConnected to: ${DB_CONFIG.host}:${DB_CONFIG.port}/${DB_CONFIG.database}`,
+  );
 
   try {
     const applied = await getAppliedMigrations(client);
-    const files   = getMigrationFiles();
-    const pending = files.filter(f => !applied.has(f));
+    const files = getMigrationFiles();
+    const pending = files.filter((f) => !applied.has(f));
 
     if (pending.length === 0) {
-      console.log('\n✓ All migrations already applied. Nothing to do.\n');
+      console.log("\n✓ All migrations already applied. Nothing to do.\n");
       return;
     }
 
@@ -113,7 +123,7 @@ async function runMigrations() {
     for (const file of pending) {
       await runMigration(client, file);
     }
-    console.log('\n✓ All migrations applied successfully.\n');
+    console.log("\n✓ All migrations applied successfully.\n");
   } finally {
     await client.end();
   }
@@ -125,16 +135,18 @@ async function showStatus() {
 
   try {
     const applied = await getAppliedMigrations(client);
-    const files   = getMigrationFiles();
+    const files = getMigrationFiles();
 
-    console.log('\n Migration Status\n');
-    console.log(' Status    File');
-    console.log(' ────────────────────────────────────────────────────────');
+    console.log("\n Migration Status\n");
+    console.log(" Status    File");
+    console.log(" ────────────────────────────────────────────────────────");
     for (const f of files) {
-      const status = applied.has(f) ? '✓ applied' : '○ pending';
+      const status = applied.has(f) ? "✓ applied" : "○ pending";
       console.log(` ${status.padEnd(10)} ${f}`);
     }
-    console.log(`\n Total: ${files.length} | Applied: ${applied.size} | Pending: ${files.length - applied.size}\n`);
+    console.log(
+      `\n Total: ${files.length} | Applied: ${applied.size} | Pending: ${files.length - applied.size}\n`,
+    );
   } finally {
     await client.end();
   }
@@ -145,7 +157,7 @@ async function verify() {
   await client.connect();
 
   try {
-    console.log('\n Schema Verification\n');
+    console.log("\n Schema Verification\n");
 
     const result = await client.query(`
       SELECT table_schema, COUNT(*) as table_count
@@ -155,7 +167,7 @@ async function verify() {
       GROUP BY table_schema ORDER BY table_schema
     `);
 
-    result.rows.forEach(r => {
+    result.rows.forEach((r) => {
       console.log(`  ${r.table_schema.padEnd(12)} ${r.table_count} tables`);
     });
 
@@ -172,31 +184,33 @@ async function verify() {
     console.log(`  Indexes:     ${indexes.rows[0].index_count}`);
 
     const roles = await client.query(
-      `SELECT role_name, COALESCE(business,'(all)') as business FROM shared.roles ORDER BY role_name`
+      `SELECT role_name, COALESCE(business,'(all)') as business FROM shared.roles ORDER BY role_name`,
     );
     console.log(`\n  Roles seeded: ${roles.rows.length}`);
-    roles.rows.forEach(r => console.log(`    • ${r.role_name} — ${r.business}`));
+    roles.rows.forEach((r) =>
+      console.log(`    • ${r.role_name} — ${r.business}`),
+    );
 
-    console.log('');
+    console.log("");
   } finally {
     await client.end();
   }
 }
 
 // ── Entry point ───────────────────────────────────────────
-const command = process.argv[2] || 'run';
+const command = process.argv[2] || "run";
 
 (async () => {
   try {
-    if (command === 'run')    await runMigrations();
-    else if (command === 'status')  await showStatus();
-    else if (command === 'verify')  await verify();
+    if (command === "run") await runMigrations();
+    else if (command === "status") await showStatus();
+    else if (command === "verify") await verify();
     else {
-      console.log('Usage: node migrate.js [run|status|verify]');
+      console.log("Usage: node migrate.js [run|status|verify]");
       process.exit(1);
     }
   } catch (err) {
-    console.error('\nMigrator error:', err.message);
+    console.error("\nMigrator error:", err.message);
     process.exit(1);
   }
 })();

@@ -1,10 +1,24 @@
-'use strict';
+"use strict";
 
 // Audit service — always use the direct pool for audit writes
 // so they are not rolled back if the main transaction fails.
-const { pool } = require('../../config/db');
+const { pool } = require("../../config/db");
 
-async function log(client, { userId, userName, business, module, action, table, recordId, before, after, metadata = {} }) {
+async function log(
+  client,
+  {
+    userId,
+    userName,
+    business,
+    module,
+    action,
+    table,
+    recordId,
+    before,
+    after,
+    metadata = {},
+  },
+) {
   // Use the passed client if available (same transaction), otherwise pool
   const db = client || pool;
 
@@ -15,21 +29,21 @@ async function log(client, { userId, userName, business, module, action, table, 
           before_state, after_state, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
-        userId   || null,
-        userName || 'system',
+        userId || null,
+        userName || "system",
         business,
         module,
         action,
-        table    || null,
+        table || null,
         recordId || null,
-        before   ? JSON.stringify(before) : null,
-        after    ? JSON.stringify(after)  : null,
+        before ? JSON.stringify(before) : null,
+        after ? JSON.stringify(after) : null,
         JSON.stringify(metadata),
-      ]
+      ],
     );
   } catch (err) {
     // Audit failures must NEVER break the main operation
-    console.error('Audit log failed (non-fatal):', err.message);
+    console.error("Audit log failed (non-fatal):", err.message);
   }
 }
 
@@ -40,7 +54,7 @@ async function getForRecord(tableName, recordId, limit = 50) {
      WHERE table_name = $1 AND record_id = $2
      ORDER BY occurred_at DESC
      LIMIT $3`,
-    [tableName, recordId, limit]
+    [tableName, recordId, limit],
   );
   return rows;
 }
@@ -52,7 +66,7 @@ async function getForUser(userId, limit = 100) {
      WHERE user_id = $1
      ORDER BY occurred_at DESC
      LIMIT $2`,
-    [userId, limit]
+    [userId, limit],
   );
   return rows;
 }

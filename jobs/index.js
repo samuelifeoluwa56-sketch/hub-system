@@ -1,20 +1,24 @@
-'use strict';
+"use strict";
 
-const cron   = require('node-cron');
-const logger = require('../config/logger');
+const cron = require("node-cron");
+const logger = require("../config/logger");
 
 const jobs = [];
 
 function register(name, schedule, fn) {
-  const task = cron.schedule(schedule, async () => {
-    try {
-      logger.debug(`Job started: ${name}`);
-      await fn();
-      logger.debug(`Job completed: ${name}`);
-    } catch (err) {
-      logger.error(`Job failed: ${name}`, err);
-    }
-  }, { scheduled: false });
+  const task = cron.schedule(
+    schedule,
+    async () => {
+      try {
+        logger.debug(`Job started: ${name}`);
+        await fn();
+        logger.debug(`Job completed: ${name}`);
+      } catch (err) {
+        logger.error(`Job failed: ${name}`, err);
+      }
+    },
+    { scheduled: false },
+  );
   jobs.push({ name, task });
 }
 
@@ -25,18 +29,54 @@ function start() {
   // '*/5 * * * *'     — every 5 minutes
   // '0 8 * * 1-5'     — 8am weekdays
 
-  register('markOverdueInvoices',    '0 7 * * *',    require('./markOverdueInvoices'));
-  register('expireReservations',     '*/10 * * * *', require('./expireReservations'));
-  register('syncCurrencyRates',      '0 9 * * 1-5',  require('./syncCurrencyRates'));
-  register('syncShopifyStock',       '*/15 * * * *', require('./syncShopifyStock'));
-  register('syncWooCommerceStock',   '*/15 * * * *', require('./syncWooCommerceStock'));
-  register('sendScheduledCampaigns', '*/5 * * * *',  require('./sendScheduledCampaigns'));
-  register('publishScheduledPosts',  '*/5 * * * *',  require('./publishScheduledPosts'));
-  register('sendPaymentReminders',   '0 9 * * *',    require('./sendPaymentReminders'));
-  register('sendMilestoneReminders', '0 8 * * *',    require('./sendMilestoneReminders'));
-  register('cleanupSessions',        '0 3 * * *',    require('./cleanupSessions'));
-  register('replayFailedWebhooks',   '*/30 * * * *', require('./replayFailedWebhooks'));
-  register('generateFiscalPeriods',  '0 0 1 * *',    require('./generateFiscalPeriods'));
+  register(
+    "markOverdueInvoices",
+    "0 7 * * *",
+    require("./markOverdueInvoices"),
+  );
+  register(
+    "expireReservations",
+    "*/10 * * * *",
+    require("./expireReservations"),
+  );
+  register("syncCurrencyRates", "0 9 * * 1-5", require("./syncCurrencyRates"));
+  register("syncShopifyStock", "*/15 * * * *", require("./syncShopifyStock"));
+  register(
+    "syncWooCommerceStock",
+    "*/15 * * * *",
+    require("./syncWooCommerceStock"),
+  );
+  register(
+    "sendScheduledCampaigns",
+    "*/5 * * * *",
+    require("./sendScheduledCampaigns"),
+  );
+  register(
+    "publishScheduledPosts",
+    "*/5 * * * *",
+    require("./publishScheduledPosts"),
+  );
+  register(
+    "sendPaymentReminders",
+    "0 9 * * *",
+    require("./sendPaymentReminders"),
+  );
+  register(
+    "sendMilestoneReminders",
+    "0 8 * * *",
+    require("./sendMilestoneReminders"),
+  );
+  register("cleanupSessions", "0 3 * * *", require("./cleanupSessions"));
+  register(
+    "replayFailedWebhooks",
+    "*/30 * * * *",
+    require("./replayFailedWebhooks"),
+  );
+  register(
+    "generateFiscalPeriods",
+    "0 0 1 * *",
+    require("./generateFiscalPeriods"),
+  );
 
   jobs.forEach(({ name, task }) => {
     task.start();

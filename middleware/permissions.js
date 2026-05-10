@@ -1,7 +1,7 @@
-'use strict';
+"use strict";
 
-const { withSharedContext } = require('../config/db');
-const { getCachedPermissions, cachePermissions } = require('../config/redis');
+const { withSharedContext } = require("../config/db");
+const { getCachedPermissions, cachePermissions } = require("../config/redis");
 
 // ── can(module, action) ───────────────────────────────────
 // Returns Express middleware that checks whether req.user
@@ -22,7 +22,7 @@ function can(module, action) {
             `SELECT module, action, record_scope, hidden_fields
              FROM shared.permissions
              WHERE role_id = $1`,
-            [role_id]
+            [role_id],
           );
           permissions = result.rows;
         });
@@ -30,7 +30,9 @@ function can(module, action) {
       }
 
       // 3. Find matching permission
-      const perm = permissions.find(p => p.module === module && p.action === action);
+      const perm = permissions.find(
+        (p) => p.module === module && p.action === action,
+      );
 
       if (!perm) {
         return res.status(403).json({
@@ -39,8 +41,8 @@ function can(module, action) {
       }
 
       // Attach scope and hidden fields for the service layer to use
-      req.permissionScope  = perm.record_scope;
-      req.hiddenFields     = perm.hidden_fields || [];
+      req.permissionScope = perm.record_scope;
+      req.hiddenFields = perm.hidden_fields || [];
 
       next();
     } catch (err) {

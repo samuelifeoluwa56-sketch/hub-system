@@ -1,20 +1,22 @@
-'use strict';
+"use strict";
 
-const { createClient } = require('redis');
-const config = require('./config');
-const logger = require('./logger');
+const { createClient } = require("redis");
+const config = require("./config");
+const logger = require("./logger");
 
 const client = createClient({ url: config.redis.url });
 
-client.on('error', err => logger.error('Redis error', err));
-client.on('connect', () => logger.info('Redis connected'));
+client.on("error", (err) => logger.error("Redis error", err));
+client.on("connect", () => logger.info("Redis connected"));
 
-(async () => { await client.connect(); })();
+(async () => {
+  await client.connect();
+})();
 
 async function shutdown() {
-  logger.info('Closing Redis connection...');
+  logger.info("Closing Redis connection...");
   await client.quit();
-  logger.info('Redis closed.');
+  logger.info("Redis closed.");
 }
 
 // ── Permission cache helpers ──────────────────────────────
@@ -34,4 +36,10 @@ async function invalidatePermissionCache(roleId) {
   await client.del(`perms:${roleId}`);
 }
 
-module.exports = { client, shutdown, getCachedPermissions, cachePermissions, invalidatePermissionCache };
+module.exports = {
+  client,
+  shutdown,
+  getCachedPermissions,
+  cachePermissions,
+  invalidatePermissionCache,
+};

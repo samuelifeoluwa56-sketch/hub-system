@@ -1,22 +1,22 @@
-'use strict';
+"use strict";
 
-const { withSharedContext } = require('../../config/db');
-const { emitToUser }        = require('../../config/sockets');
-const logger                = require('../../config/logger');
-const whatsapp  = require('./adapters/whatsapp');
-const instaDM   = require('./adapters/instagram-dm');
-const fbMsgr    = require('./adapters/facebook-messenger');
+const { withSharedContext } = require("../../config/db");
+const { emitToUser } = require("../../config/sockets");
+const logger = require("../../config/logger");
+const whatsapp = require("./adapters/whatsapp");
+const instaDM = require("./adapters/instagram-dm");
+const fbMsgr = require("./adapters/facebook-messenger");
 
 // Route inbound messages to the right Smartcomm channel
 async function handleInbound({ source, entry, messaging }) {
   try {
     let normalized;
 
-    if (source === 'whatsapp_business_account') {
+    if (source === "whatsapp_business_account") {
       normalized = whatsapp.parseInbound(messaging);
-    } else if (source === 'instagram') {
+    } else if (source === "instagram") {
       normalized = instaDM.parseInbound(messaging);
-    } else if (source === 'page') {
+    } else if (source === "page") {
       normalized = fbMsgr.parseInbound(messaging);
     }
 
@@ -27,7 +27,7 @@ async function handleInbound({ source, entry, messaging }) {
       let contactResult = await client.query(
         `SELECT contact_id FROM shared.contacts
          WHERE primary_phone = $1 OR whatsapp_number = $1 LIMIT 1`,
-        [normalized.senderPhone || normalized.senderId]
+        [normalized.senderPhone || normalized.senderId],
       );
 
       let contactId;
@@ -39,7 +39,11 @@ async function handleInbound({ source, entry, messaging }) {
              (contact_type, display_name, primary_phone, whatsapp_number, source)
            VALUES (ARRAY['customer'], $1, $2, $2, $3)
            RETURNING contact_id`,
-          [normalized.senderName || 'Unknown', normalized.senderPhone || normalized.senderId, source]
+          [
+            normalized.senderName || "Unknown",
+            normalized.senderPhone || normalized.senderId,
+            source,
+          ],
         );
         contactId = inserted.rows[0].contact_id;
       }
@@ -50,7 +54,7 @@ async function handleInbound({ source, entry, messaging }) {
          JOIN shared.channel_members m ON m.channel_id = c.channel_id
          WHERE c.channel_type = 'customer_thread'
            AND m.contact_id = $1 LIMIT 1`,
-        [contactId]
+        [contactId],
       );
 
       let channelId;
@@ -62,13 +66,15 @@ async function handleInbound({ source, entry, messaging }) {
              (channel_type, name, metadata)
            VALUES ('customer_thread', $1, $2)
            RETURNING channel_id`,
-          [`Thread: ${normalized.senderName || normalized.senderId}`,
-           JSON.stringify({ source, external_id: normalized.senderId })]
+          [
+            `Thread: ${normalized.senderName || normalized.senderId}`,
+            JSON.stringify({ source, external_id: normalized.senderId }),
+          ],
         );
         channelId = ch.rows[0].channel_id;
         await client.query(
           `INSERT INTO shared.channel_members (channel_id, contact_id) VALUES ($1, $2)`,
-          [channelId, contactId]
+          [channelId, contactId],
         );
       }
 
@@ -78,28 +84,28 @@ async function handleInbound({ source, entry, messaging }) {
            (channel_id, sender_contact_id, message_type, content, external_ref)
          VALUES ($1, $2, 'text', $3, $4)
          RETURNING message_id`,
-        [channelId, contactId, normalized.text, normalized.externalRef]
+        [channelId, contactId, normalized.text, normalized.externalRef],
       );
 
       // Emit real-time notification to business room
-      emitToUser('business:jewelry', 'message:new', {
+      emitToUser("business:jewelry", "message:new", {
         channelId,
         messageId: msg.rows[0].message_id,
         source,
       });
     });
   } catch (err) {
-    logger.error('handleInbound error', err);
+    logger.error("handleInbound error", err);
   }
 }
 
 // Send a reply back to the customer via the correct channel
 async function sendReply({ contactId, channelId, text, source }) {
-  if (source === 'whatsapp_business_account' || source === 'whatsapp') {
+  if (source === "whatsapp_business_account" || source === "whatsapp") {
     await whatsapp.sendMessage({ to: contactId, text });
-  } else if (source === 'instagram') {
+  } else if (source === "instagram") {
     await instaDM.sendMessage({ recipientId: contactId, text });
-  } else if (source === 'page') {
+  } else if (source === "page") {
     await fbMsgr.sendMessage({ recipientId: contactId, text });
   }
 }

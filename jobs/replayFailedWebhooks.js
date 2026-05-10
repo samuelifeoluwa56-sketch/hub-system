@@ -1,6 +1,6 @@
-'use strict';
-const { pool } = require('../config/db');
-const logger   = require('../config/logger');
+"use strict";
+const { pool } = require("../config/db");
+const logger = require("../config/logger");
 
 module.exports = async function replayFailedWebhooks() {
   const { rows } = await pool.query(
@@ -10,7 +10,7 @@ module.exports = async function replayFailedWebhooks() {
        AND error_message IS NOT NULL
        AND retry_count < 5
        AND received_at > now() - INTERVAL '24 hours'
-     LIMIT 20`
+     LIMIT 20`,
   );
 
   if (!rows.length) return;
@@ -21,10 +21,12 @@ module.exports = async function replayFailedWebhooks() {
     try {
       await pool.query(
         `UPDATE shared.webhook_log SET retry_count = retry_count + 1 WHERE webhook_id = $1`,
-        [webhook.webhook_id]
+        [webhook.webhook_id],
       );
       // TODO: dispatch to appropriate handler based on source
-      logger.info(`Replayed webhook ${webhook.webhook_id} [${webhook.source}/${webhook.event_type}]`);
+      logger.info(
+        `Replayed webhook ${webhook.webhook_id} [${webhook.source}/${webhook.event_type}]`,
+      );
     } catch (err) {
       logger.error(`Replay failed for webhook ${webhook.webhook_id}`, err);
     }

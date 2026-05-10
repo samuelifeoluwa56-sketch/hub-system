@@ -1,2 +1,2 @@
-'use strict';
+"use strict";
 // TODO: stock.test.js

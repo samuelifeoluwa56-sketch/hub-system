@@ -1,28 +1,28 @@
-'use strict';
+"use strict";
 
-const { Pool } = require('pg');
-const config   = require('./config');
-const logger   = require('./logger');
+const { Pool } = require("pg");
+const config = require("./config");
+const logger = require("./logger");
 
 // ── Connection pool ───────────────────────────────────────
 const pool = new Pool({
-  host:     config.pg.host,
-  port:     config.pg.port,
+  host: config.pg.host,
+  port: config.pg.port,
   database: config.pg.database,
-  user:     config.pg.user,
+  user: config.pg.user,
   password: config.pg.password,
-  ssl:      config.pg.ssl,
+  ssl: config.pg.ssl,
   ...config.pg.pool,
 });
 
-pool.on('connect', client => {
+pool.on("connect", (client) => {
   // Set default search_path to shared only on raw connections
   // businessContext middleware overrides this per-request using SET LOCAL
   client.query("SET search_path TO shared, public");
 });
 
-pool.on('error', (err) => {
-  logger.error('Unexpected PG pool error', err);
+pool.on("error", (err) => {
+  logger.error("Unexpected PG pool error", err);
 });
 
 // ── Transaction wrapper with business context ─────────────
@@ -36,15 +36,13 @@ async function withBusinessContext(business, callback) {
 
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-    await client.query(
-      `SET LOCAL search_path TO ${business}, shared, public`
-    );
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL search_path TO ${business}, shared, public`);
     const result = await callback(client);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
@@ -57,13 +55,13 @@ async function withBusinessContext(business, callback) {
 async function withSharedContext(callback) {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
     await client.query("SET LOCAL search_path TO shared, public");
     const result = await callback(client);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
@@ -79,26 +77,33 @@ async function nextDocumentNumber(client, business, documentType) {
      SET next_number = next_number + 1
      WHERE business = $1 AND document_type = $2
      RETURNING prefix, next_number, padding`,
-    [business, documentType]
+    [business, documentType],
   );
   if (!result.rows.length) {
     throw new Error(`No sequence defined for ${business}/${documentType}`);
   }
   const { prefix, next_number, padding } = result.rows[0];
-  return `${prefix}-${String(next_number).padStart(padding, '0')}`;
+  return `${prefix}-${String(next_number).padStart(padding, "0")}`;
 }
 
 // ── Graceful shutdown ─────────────────────────────────────
 async function shutdown() {
-  logger.info('Closing PostgreSQL pool...');
+  logger.info("Closing PostgreSQL pool...");
   await pool.end();
-  logger.info('PostgreSQL pool closed.');
+  logger.info("PostgreSQL pool closed.");
 }
 
 // ── Health check ──────────────────────────────────────────
 async function healthCheck() {
-  const result = await pool.query('SELECT now() AS time');
+  const result = await pool.query("SELECT now() AS time");
   return result.rows[0].time;
 }
 
-module.exports = { pool, withBusinessContext, withSharedContext, nextDocumentNumber, shutdown, healthCheck };
+module.exports = {
+  pool,
+  withBusinessContext,
+  withSharedContext,
+  nextDocumentNumber,
+  shutdown,
+  healthCheck,
+};
