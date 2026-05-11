@@ -1,15 +1,19 @@
-'use strict';
+"use strict";
 
-const { withSharedContext } = require('../../config/db');
-const auditService = require('../audit/audit.service');
+const { withSharedContext } = require("../../config/db");
+const auditService = require("../audit/audit.service");
 
-async function list({ search = '', type, page = 1, limit = 50 }, user, hiddenFields = []) {
+async function list(
+  { search = "", type, page = 1, limit = 50 },
+  user,
+  hiddenFields = [],
+) {
   return withSharedContext(async (client) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [`%${search}%`];
     let where = `WHERE is_deleted = false
                    AND visible_to && ARRAY[$2]`;
-    params.push(user.current_business || 'jewelry');
+    params.push(user.current_business || "jewelry");
 
     if (type) {
       params.push(type);
@@ -21,9 +25,11 @@ async function list({ search = '', type, page = 1, limit = 50 }, user, hiddenFie
       where += ` AND (display_name ILIKE $1 OR primary_phone ILIKE $1 OR email ILIKE $1)`;
     } else {
       params.shift();
-      where = where.replace('$2', '$1');
-      params.unshift(user.current_business || 'jewelry');
-      if (type) { /* already handled */ }
+      where = where.replace("$2", "$1");
+      params.unshift(user.current_business || "jewelry");
+      if (type) {
+        /* already handled */
+      }
     }
 
     // Simple query without complex param rewriting
@@ -38,17 +44,30 @@ async function list({ search = '', type, page = 1, limit = 50 }, user, hiddenFie
          AND ($3::TEXT IS NULL OR $3 = ANY(contact_type))
        ORDER BY display_name ASC
        LIMIT $4 OFFSET $5`,
-      [user.current_business, search ? `%${search}%` : null, type || null, parseInt(limit), offset]
+      [
+        user.current_business,
+        search ? `%${search}%` : null,
+        type || null,
+        parseInt(limit),
+        offset,
+      ],
     );
 
-    const { rows: [{ count }] } = await client.query(
+    const {
+      rows: [{ count }],
+    } = await client.query(
       `SELECT COUNT(*) FROM shared.contacts
        WHERE is_deleted = false
          AND ($1 = ANY(visible_to) OR visible_to IS NULL)`,
-      [user.current_business]
+      [user.current_business],
     );
 
-    return { data: rows, total: parseInt(count), page: parseInt(page), limit: parseInt(limit) };
+    return {
+      data: rows,
+      total: parseInt(count),
+      page: parseInt(page),
+      limit: parseInt(limit),
+    };
   });
 }
 
@@ -63,7 +82,7 @@ async function getById(contactId, hiddenFields = []) {
        LEFT JOIN shared.contact_tags ct ON ct.contact_id = c.contact_id
        WHERE c.contact_id = $1 AND c.is_deleted = false
        GROUP BY c.contact_id`,
-      [contactId]
+      [contactId],
     );
     return rows[0] || null;
   });
@@ -71,7 +90,9 @@ async function getById(contactId, hiddenFields = []) {
 
 async function create(data, user) {
   return withSharedContext(async (client) => {
-    const { rows: [contact] } = await client.query(
+    const {
+      rows: [contact],
+    } = await client.query(
       `INSERT INTO shared.contacts
          (contact_type, display_name, first_name, last_name, company_name,
           primary_phone, whatsapp_number, email, priority_level, source,
@@ -82,28 +103,28 @@ async function create(data, user) {
         data.contact_type,
         data.display_name,
         data.first_name || null,
-        data.last_name  || null,
+        data.last_name || null,
         data.company_name || null,
         data.primary_phone,
         data.whatsapp_number || null,
         data.email || null,
-        data.priority_level || 'regular',
+        data.priority_level || "regular",
         data.source || null,
-        data.visible_to || ['jewelry','diffusers'],
+        data.visible_to || ["jewelry", "diffusers"],
         data.notes || null,
         user.user_id,
-      ]
+      ],
     );
 
     await auditService.log(client, {
-      userId:   user.user_id,
-      userName: user.display_name || 'System',
-      business: user.current_business || 'shared',
-      module:   'crm',
-      action:   'create',
-      table:    'contacts',
+      userId: user.user_id,
+      userName: user.display_name || "System",
+      business: user.current_business || "shared",
+      module: "crm",
+      action: "create",
+      table: "contacts",
       recordId: contact.contact_id,
-      after:    contact,
+      after: contact,
     });
 
     return contact;
@@ -112,16 +133,30 @@ async function create(data, user) {
 
 async function update(contactId, data, user) {
   return withSharedContext(async (client) => {
-    const { rows: [before] } = await client.query(
-      `SELECT * FROM shared.contacts WHERE contact_id = $1`, [contactId]
+    const {
+      rows: [before],
+    } = await client.query(
+      `SELECT * FROM shared.contacts WHERE contact_id = $1`,
+      [contactId],
     );
-    if (!before) throw Object.assign(new Error('Contact not found'), { status: 404 });
+    if (!before)
+      throw Object.assign(new Error("Contact not found"), { status: 404 });
 
-    const fields = ['display_name','first_name','last_name','company_name',
-                    'primary_phone','whatsapp_number','email','priority_level',
-                    'source','notes','addresses'];
+    const fields = [
+      "display_name",
+      "first_name",
+      "last_name",
+      "company_name",
+      "primary_phone",
+      "whatsapp_number",
+      "email",
+      "priority_level",
+      "source",
+      "notes",
+      "addresses",
+    ];
     const updates = [];
-    const values  = [];
+    const values = [];
 
     for (const field of fields) {
       if (data[field] !== undefined) {
@@ -133,19 +168,21 @@ async function update(contactId, data, user) {
     if (!updates.length) return before;
 
     values.push(contactId);
-    const { rows: [after] } = await client.query(
-      `UPDATE shared.contacts SET ${updates.join(', ')}, updated_at = now()
+    const {
+      rows: [after],
+    } = await client.query(
+      `UPDATE shared.contacts SET ${updates.join(", ")}, updated_at = now()
        WHERE contact_id = $${values.length} RETURNING *`,
-      values
+      values,
     );
 
     await auditService.log(client, {
-      userId:   user.user_id,
-      userName: user.display_name || 'System',
-      business: user.current_business || 'shared',
-      module:   'crm',
-      action:   'update',
-      table:    'contacts',
+      userId: user.user_id,
+      userName: user.display_name || "System",
+      business: user.current_business || "shared",
+      module: "crm",
+      action: "update",
+      table: "contacts",
       recordId: contactId,
       before,
       after,
@@ -157,20 +194,22 @@ async function update(contactId, data, user) {
 
 async function softDelete(contactId, user) {
   return withSharedContext(async (client) => {
-    const { rows: [before] } = await client.query(
+    const {
+      rows: [before],
+    } = await client.query(
       `UPDATE shared.contacts
        SET is_deleted = true, deleted_at = now(), updated_at = now()
        WHERE contact_id = $1 RETURNING *`,
-      [contactId]
+      [contactId],
     );
 
     await auditService.log(client, {
-      userId:   user.user_id,
-      userName: user.display_name || 'System',
-      business: user.current_business || 'shared',
-      module:   'crm',
-      action:   'delete',
-      table:    'contacts',
+      userId: user.user_id,
+      userName: user.display_name || "System",
+      business: user.current_business || "shared",
+      module: "crm",
+      action: "delete",
+      table: "contacts",
       recordId: contactId,
       before,
     });
@@ -184,7 +223,7 @@ async function getTimeline(contactId, business) {
        FROM ${business}.crm_activities
        WHERE contact_id = $1
        ORDER BY performed_at DESC LIMIT 50`,
-      [contactId]
+      [contactId],
     );
 
     const invoices = await client.query(
@@ -192,7 +231,7 @@ async function getTimeline(contactId, business) {
        FROM ${business}.invoices
        WHERE contact_id = $1 AND is_deleted = false
        ORDER BY issue_date DESC LIMIT 20`,
-      [contactId]
+      [contactId],
     );
 
     const deals = await client.query(
@@ -200,13 +239,13 @@ async function getTimeline(contactId, business) {
        FROM ${business}.crm_deals
        WHERE contact_id = $1 AND is_deleted = false
        ORDER BY created_at DESC LIMIT 10`,
-      [contactId]
+      [contactId],
     );
 
     return {
       activities: activities.rows,
-      invoices:   invoices.rows,
-      deals:      deals.rows,
+      invoices: invoices.rows,
+      deals: deals.rows,
     };
   });
 }
@@ -218,11 +257,13 @@ async function addAddress(contactId, data, user) {
         `UPDATE shared.contact_addresses
          SET is_default = false
          WHERE contact_id = $1 AND address_type = $2`,
-        [contactId, data.address_type || 'delivery']
+        [contactId, data.address_type || "delivery"],
       );
     }
 
-    const { rows: [address] } = await client.query(
+    const {
+      rows: [address],
+    } = await client.query(
       `INSERT INTO shared.contact_addresses
          (contact_id, address_type, line1, line2, area, city, state, country,
           landmark, recipient_name, recipient_phone, is_default, created_by)
@@ -230,19 +271,30 @@ async function addAddress(contactId, data, user) {
        RETURNING *`,
       [
         contactId,
-        data.address_type || 'delivery',
-        data.line1, data.line2 || null,
-        data.area  || null, data.city || 'Lagos',
-        data.state || 'Lagos', data.country || 'Nigeria',
+        data.address_type || "delivery",
+        data.line1,
+        data.line2 || null,
+        data.area || null,
+        data.city || "Lagos",
+        data.state || "Lagos",
+        data.country || "Nigeria",
         data.landmark || null,
-        data.recipient_name  || null,
+        data.recipient_name || null,
         data.recipient_phone || null,
         data.is_default || false,
         user.user_id,
-      ]
+      ],
     );
     return address;
   });
 }
 
-module.exports = { list, getById, create, update, softDelete, getTimeline, addAddress };
+module.exports = {
+  list,
+  getById,
+  create,
+  update,
+  softDelete,
+  getTimeline,
+  addAddress,
+};

@@ -11,7 +11,7 @@ cp .env.example .env.local
 # Edit .env.local with your values
 
 # 3. Create PostgreSQL database
-createdb hub_db
+createdb hubdata
 
 # 4. Run migrations
 npm run migrate

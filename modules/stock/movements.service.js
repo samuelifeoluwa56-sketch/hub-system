@@ -1,2 +1,2 @@
-'use strict';
+"use strict";
 // TODO: movements.service.js

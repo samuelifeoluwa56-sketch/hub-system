@@ -1,6 +1,6 @@
-'use strict';
+"use strict";
 
-const config = require('../config/config');
+const config = require("../config/config");
 
 // ── setBusinessContext ────────────────────────────────────
 // Validates the business from the JWT and attaches it to req.
@@ -10,11 +10,11 @@ const config = require('../config/config');
 // This middleware just validates and exposes req.business
 // so routes can call withBusinessContext(req.business, ...).
 function setBusinessContext(req, res, next) {
-  const business = req.headers['x-business-line'] || req.user?.current_business;
+  const business = req.headers["x-business-line"] || req.user?.current_business;
 
   if (!business || !config.app.businesses.includes(business)) {
     return res.status(400).json({
-      message: `Invalid or missing business context. Must be one of: ${config.app.businesses.join(', ')}`,
+      message: `Invalid or missing business context. Must be one of: ${config.app.businesses.join(", ")}`,
     });
   }
 
