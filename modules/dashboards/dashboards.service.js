@@ -1,8 +1,8 @@
 "use strict";
 
 const { withBusinessContext } = require("../../config/db");
+const repo = require("./dashboards.repository");
 
-// Helper — parse period filter. Defaults to current month
 function getPeriodDates(query) {
   const now = new Date();
   const year = parseInt(query.year || now.getFullYear());
@@ -25,81 +25,19 @@ async function getSalesDashboard(business, query, user) {
       quoteConversion,
       paymentMethods,
     ] = await Promise.all([
-      // Total revenue & order count
-      client.query(
-        `SELECT
-           COALESCE(SUM(i.total_amount),0)                                    AS total_revenue,
-           COALESCE(SUM(i.amount_paid),0)                                     AS total_collected,
-           COALESCE(SUM(i.amount_outstanding),0)                              AS total_outstanding,
-           COUNT(i.invoice_id)                                                 AS invoice_count,
-           COUNT(i.invoice_id) FILTER (WHERE i.status='paid')                AS paid_count,
-           COUNT(i.invoice_id) FILTER (WHERE i.status IN ('overdue','partially_paid')) AS unpaid_count,
-           COALESCE(AVG(i.total_amount),0)                                    AS avg_order_value
-         FROM invoices i
-         WHERE i.issue_date BETWEEN $1 AND $2 AND i.is_deleted=false
-           AND i.status != 'voided'`,
-        [startDate, endDate],
-      ),
-      // Top 5 products by revenue
-      client.query(
-        `SELECT il.description, il.product_id,
-                SUM(il.line_total) AS revenue,
-                SUM(il.quantity)   AS units_sold
-         FROM invoice_lines il
-         JOIN invoices i ON i.invoice_id = il.invoice_id
-         WHERE i.issue_date BETWEEN $1 AND $2
-           AND i.status != 'voided' AND i.is_deleted=false
-         GROUP BY il.description, il.product_id
-         ORDER BY revenue DESC LIMIT 5`,
-        [startDate, endDate],
-      ),
-      // Revenue by day
-      client.query(
-        `SELECT DATE(i.issue_date) AS date,
-                COALESCE(SUM(i.total_amount),0) AS revenue,
-                COUNT(i.invoice_id) AS orders
-         FROM invoices i
-         WHERE i.issue_date BETWEEN $1 AND $2
-           AND i.status != 'voided' AND i.is_deleted=false
-         GROUP BY DATE(i.issue_date)
-         ORDER BY date ASC`,
-        [startDate, endDate],
-      ),
-      // Quotation to order conversion
-      client.query(
-        `SELECT
-           COUNT(*) FILTER (WHERE status='confirmed')          AS confirmed,
-           COUNT(*) FILTER (WHERE status IN ('sent','viewed')) AS pending,
-           COUNT(*) FILTER (WHERE status='expired')            AS expired,
-           COUNT(*) FILTER (WHERE status='cancelled')          AS cancelled,
-           COUNT(*)                                            AS total,
-           ROUND(COUNT(*) FILTER (WHERE status='confirmed')::NUMERIC /
-                 NULLIF(COUNT(*),0)*100,1) AS conversion_rate
-         FROM quotations
-         WHERE created_at::DATE BETWEEN $1 AND $2 AND is_deleted=false`,
-        [startDate, endDate],
-      ),
-      // Payment methods breakdown
-      client.query(
-        `SELECT ip.payment_method,
-                COUNT(*)            AS transaction_count,
-                SUM(ip.amount)      AS total_amount
-         FROM invoice_payments ip
-         JOIN invoices i ON i.invoice_id=ip.invoice_id
-         WHERE i.issue_date BETWEEN $1 AND $2
-         GROUP BY ip.payment_method
-         ORDER BY total_amount DESC`,
-        [startDate, endDate],
-      ),
+      repo.getSalesRevenue(client, { startDate, endDate }),
+      repo.getTopProducts(client, { startDate, endDate }),
+      repo.getRevenueByDay(client, { startDate, endDate }),
+      repo.getQuoteConversion(client, { startDate, endDate }),
+      repo.getPaymentMethods(client, { startDate, endDate }),
     ]);
-
     return {
       period: { startDate, endDate },
-      revenue: revenue.rows[0],
-      top_products: topProducts.rows,
-      revenue_by_day: revenueByDay.rows,
-      quotations: quoteConversion.rows[0],
-      payment_methods: paymentMethods.rows,
+      revenue,
+      top_products: topProducts,
+      revenue_by_day: revenueByDay,
+      quotations: quoteConversion,
+      payment_methods: paymentMethods,
     };
   });
 }
@@ -109,56 +47,17 @@ async function getFinanceDashboard(business, query) {
   return withBusinessContext(business, async (client) => {
     const [incomeVsExpense, arAgeing, apSummary, cashBalance] =
       await Promise.all([
-        // Income vs expenses from journal
-        client.query(
-          `SELECT
-           COALESCE(SUM(jl.credit) FILTER (WHERE coa.account_type='income'),0)  AS total_income,
-           COALESCE(SUM(jl.debit)  FILTER (WHERE coa.account_type='expense'),0) AS total_expenses,
-           COALESCE(SUM(jl.credit) FILTER (WHERE coa.account_type='income'),0) -
-           COALESCE(SUM(jl.debit)  FILTER (WHERE coa.account_type='expense'),0) AS net_profit
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.entry_id=jl.entry_id
-         JOIN chart_of_accounts coa ON coa.account_id=jl.account_id
-         WHERE je.entry_date BETWEEN $1 AND $2`,
-          [startDate, endDate],
-        ),
-        // AR ageing buckets
-        client.query(
-          `SELECT
-           COALESCE(SUM(amount_outstanding) FILTER (WHERE CURRENT_DATE-due_date BETWEEN 0  AND 30),0)  AS bucket_0_30,
-           COALESCE(SUM(amount_outstanding) FILTER (WHERE CURRENT_DATE-due_date BETWEEN 31 AND 60),0)  AS bucket_31_60,
-           COALESCE(SUM(amount_outstanding) FILTER (WHERE CURRENT_DATE-due_date BETWEEN 61 AND 90),0)  AS bucket_61_90,
-           COALESCE(SUM(amount_outstanding) FILTER (WHERE CURRENT_DATE-due_date > 90),0)               AS bucket_90_plus,
-           COALESCE(SUM(amount_outstanding),0)                                                          AS total_outstanding
-         FROM invoices
-         WHERE status IN ('overdue','partially_paid','sent') AND is_deleted=false`,
-        ),
-        // AP — what we owe suppliers
-        client.query(
-          `SELECT
-           COALESCE(SUM(amount - amount_paid),0)                                 AS total_ap,
-           COUNT(*) FILTER (WHERE due_date < CURRENT_DATE AND status='approved') AS overdue_count
-         FROM supplier_invoices WHERE status IN ('pending','matched','approved')`,
-        ),
-        // Bank balance
-        client.query(
-          `SELECT
-           ba.account_id, ba.bank_name, ba.account_name,
-           COALESCE(SUM(bs.amount),0) AS running_balance
-         FROM shared.bank_accounts ba
-         LEFT JOIN bank_statements bs ON bs.bank_account_id=ba.account_id
-         WHERE ba.business=$1 AND ba.is_active=true
-         GROUP BY ba.account_id, ba.bank_name, ba.account_name`,
-          [business],
-        ),
+        repo.getIncomeVsExpense(client, { startDate, endDate }),
+        repo.getARAgeing(client),
+        repo.getAPSummary(client),
+        repo.getBankBalances(client, business),
       ]);
-
     return {
       period: { startDate, endDate },
-      income_vs_expense: incomeVsExpense.rows[0],
-      ar_ageing: arAgeing.rows[0],
-      ap_summary: apSummary.rows[0],
-      bank_balances: cashBalance.rows,
+      income_vs_expense: incomeVsExpense,
+      ar_ageing: arAgeing,
+      ap_summary: apSummary,
+      bank_balances: cashBalance,
     };
   });
 }
@@ -167,63 +66,16 @@ async function getStockDashboard(business, query) {
   return withBusinessContext(business, async (client) => {
     const [totalValue, lowStock, topMoving, locationBreakdown] =
       await Promise.all([
-        // Total stock value
-        client.query(
-          `SELECT
-           COUNT(DISTINCT p.product_id)                   AS total_products,
-           COALESCE(SUM(p.cost_price * stock.qty),0)     AS total_cost_value,
-           COALESCE(SUM(p.selling_price * stock.qty),0)  AS total_retail_value
-         FROM products p
-         JOIN (
-           SELECT product_id, COALESCE(SUM(quantity*direction),0) AS qty
-           FROM stock_movements GROUP BY product_id
-         ) stock ON stock.product_id=p.product_id
-         WHERE p.is_deleted=false AND stock.qty > 0`,
-        ),
-        // Low stock count
-        client.query(
-          `SELECT COUNT(*) AS low_stock_count
-         FROM (
-           SELECT p.product_id
-           FROM products p
-           LEFT JOIN (
-             SELECT product_id, COALESCE(SUM(quantity*direction),0) AS qty
-             FROM stock_movements GROUP BY product_id
-           ) s ON s.product_id=p.product_id
-           WHERE p.is_deleted=false AND p.is_active=true
-             AND COALESCE(s.qty,0) <= p.reorder_level
-         ) low`,
-        ),
-        // Top 5 fastest moving products (last 30 days)
-        client.query(
-          `SELECT p.name, p.sku, ABS(SUM(sm.quantity)) AS units_out
-         FROM stock_movements sm
-         JOIN products p ON p.product_id=sm.product_id
-         WHERE sm.direction=-1
-           AND sm.movement_type IN ('sold','pos_sale')
-           AND sm.performed_at >= now()-INTERVAL '30 days'
-         GROUP BY p.product_id, p.name, p.sku
-         ORDER BY units_out DESC LIMIT 5`,
-        ),
-        // Stock by location
-        client.query(
-          `SELECT l.name AS location_name, l.location_type,
-                COUNT(DISTINCT sm.product_id)     AS product_count,
-                COALESCE(SUM(sm.quantity*sm.direction),0) AS total_units
-         FROM stock_locations l
-         LEFT JOIN stock_movements sm ON
-           COALESCE(sm.to_location_id, sm.from_location_id) = l.location_id
-         WHERE l.is_active=true
-         GROUP BY l.location_id, l.name, l.location_type
-         ORDER BY total_units DESC`,
-        ),
+        repo.getTotalStockValue(client),
+        repo.getLowStockCount(client),
+        repo.getTopMovingProducts(client),
+        repo.getStockByLocation(client),
       ]);
-
     return {
-      total_value: totalValue.rows[0],
-      low_stock: lowStock.rows[0],
-      top_moving: topMoving.rows,
-      location_breakdown: locationBreakdown.rows,
+      total_value: totalValue,
+      low_stock: lowStock,
+      top_moving: topMoving,
+      location_breakdown: locationBreakdown,
     };
   });
 }
@@ -233,85 +85,24 @@ async function getCustomerDashboard(business, query) {
   return withBusinessContext(business, async (client) => {
     const [summary, newVsReturning, topCustomers, pipelineHealth] =
       await Promise.all([
-        client.query(
-          `SELECT
-           COUNT(DISTINCT c.contact_id)                                    AS total_customers,
-           COUNT(DISTINCT c.contact_id) FILTER (WHERE c.priority_level='vip')      AS vip_count,
-           COUNT(DISTINCT c.contact_id) FILTER (WHERE c.created_at::DATE >= $1)    AS new_this_period
-         FROM shared.contacts c
-         WHERE 'customer' = ANY(c.contact_type) AND c.is_deleted=false
-           AND $3 = ANY(c.visible_to)`,
-          [startDate, endDate, business],
-        ),
-        client.query(
-          `SELECT
-           COUNT(DISTINCT i.contact_id) FILTER (
-             WHERE NOT EXISTS (
-               SELECT 1 FROM invoices i2
-               WHERE i2.contact_id=i.contact_id
-                 AND i2.issue_date < $1 AND i2.is_deleted=false
-             )
-           ) AS new_customers,
-           COUNT(DISTINCT i.contact_id) FILTER (
-             WHERE EXISTS (
-               SELECT 1 FROM invoices i2
-               WHERE i2.contact_id=i.contact_id
-                 AND i2.issue_date < $1 AND i2.is_deleted=false
-             )
-           ) AS returning_customers
-         FROM invoices i
-         WHERE i.issue_date BETWEEN $1 AND $2 AND i.is_deleted=false`,
-          [startDate, endDate],
-        ),
-        client.query(
-          `SELECT c.display_name, c.contact_id, c.priority_level,
-                SUM(i.total_amount) AS lifetime_value,
-                COUNT(i.invoice_id) AS order_count,
-                MAX(i.issue_date)   AS last_order
-         FROM shared.contacts c
-         JOIN invoices i ON i.contact_id=c.contact_id
-         WHERE i.is_deleted=false
-         GROUP BY c.contact_id, c.display_name, c.priority_level
-         ORDER BY lifetime_value DESC LIMIT 10`,
-        ),
-        client.query(
-          `SELECT stage, COUNT(*) AS count, COALESCE(SUM(expected_value),0) AS total_value
-         FROM crm_deals WHERE is_deleted=false AND won_at IS NULL AND lost_at IS NULL
-         GROUP BY stage ORDER BY count DESC`,
-        ),
+        repo.getCustomerSummary(client, { startDate, endDate, business }),
+        repo.getNewVsReturning(client, { startDate, endDate }),
+        repo.getTopCustomers(client),
+        repo.getPipelineHealth(client),
       ]);
-
     return {
       period: { startDate, endDate },
-      summary: summary.rows[0],
-      new_vs_returning: newVsReturning.rows[0],
-      top_customers: topCustomers.rows,
-      pipeline_health: pipelineHealth.rows,
+      summary,
+      new_vs_returning: newVsReturning,
+      top_customers: topCustomers,
+      pipeline_health: pipelineHealth,
     };
   });
 }
 
 async function getRetailPartnerDashboard(business, query) {
-  const { startDate, endDate } = getPeriodDates(query);
   return withBusinessContext(business, async (client) => {
-    const { rows } = await client.query(
-      `SELECT rp.partner_id, rp.partner_code, rp.current_balance,
-              rp.settlement_cycle, rp.arrangement_type,
-              c.display_name AS partner_name,
-              COUNT(DISTINCT cs.consignment_id) AS active_consignments,
-              COALESCE(SUM(cs.quantity_outstanding),0) AS units_held,
-              COALESCE(SUM(cs.quantity_sold * cs.agreed_price),0) AS consignment_value,
-              MAX(ps.period_end) AS last_settlement
-       FROM retail_partners rp
-       JOIN shared.contacts c ON c.contact_id=rp.contact_id
-       LEFT JOIN consignment_stock cs ON cs.partner_id=rp.partner_id AND cs.status='active'
-       LEFT JOIN partner_settlements ps ON ps.partner_id=rp.partner_id
-       WHERE rp.is_active=true
-       GROUP BY rp.partner_id, rp.partner_code, rp.current_balance,
-                rp.settlement_cycle, rp.arrangement_type, c.display_name
-       ORDER BY rp.current_balance DESC`,
-    );
-    return { data: rows };
+    return { data: await repo.getRetailPartners(client) };
   });
 }
 
@@ -319,48 +110,15 @@ async function getLogisticsDashboard(business, query) {
   const { startDate, endDate } = getPeriodDates(query);
   return withBusinessContext(business, async (client) => {
     const [summary, byCourier, activeDeliveries] = await Promise.all([
-      client.query(
-        `SELECT
-           COUNT(*) FILTER (WHERE status='pending_dispatch')  AS pending,
-           COUNT(*) FILTER (WHERE status IN ('dispatched','picked_up','in_transit')) AS in_transit,
-           COUNT(*) FILTER (WHERE status='delivered')         AS delivered,
-           COUNT(*) FILTER (WHERE status='failed')            AS failed,
-           COUNT(*) FILTER (WHERE status='returned')          AS returned,
-           COALESCE(SUM(delivery_fee),0)                      AS total_fees,
-           COALESCE(AVG(EXTRACT(EPOCH FROM (delivered_at-dispatched_at))/3600),0) AS avg_delivery_hours
-         FROM deliveries
-         WHERE created_at::DATE BETWEEN $1 AND $2`,
-        [startDate, endDate],
-      ),
-      client.query(
-        `SELECT courier,
-                COUNT(*)                                          AS total,
-                COUNT(*) FILTER (WHERE status='delivered')       AS delivered,
-                COUNT(*) FILTER (WHERE status='failed')          AS failed,
-                ROUND(COUNT(*) FILTER (WHERE status='delivered')::NUMERIC /
-                      NULLIF(COUNT(*),0)*100,1)                  AS success_rate,
-                COALESCE(AVG(delivery_fee),0)                    AS avg_fee
-         FROM deliveries
-         WHERE created_at::DATE BETWEEN $1 AND $2
-         GROUP BY courier`,
-        [startDate, endDate],
-      ),
-      client.query(
-        `SELECT d.delivery_id, d.delivery_number, d.status, d.courier,
-                d.dispatched_at, c.display_name AS contact_name
-         FROM deliveries d
-         JOIN shared.contacts c ON c.contact_id=d.contact_id
-         WHERE d.status NOT IN ('delivered','returned','failed')
-         ORDER BY d.created_at ASC
-         LIMIT 20`,
-      ),
+      repo.getLogisticsSummary(client, { startDate, endDate }),
+      repo.getLogisticsByCourier(client, { startDate, endDate }),
+      repo.getActiveDeliveries(client),
     ]);
-
     return {
       period: { startDate, endDate },
-      summary: summary.rows[0],
-      by_courier: byCourier.rows,
-      active_deliveries: activeDeliveries.rows,
+      summary,
+      by_courier: byCourier,
+      active_deliveries: activeDeliveries,
     };
   });
 }
@@ -369,48 +127,19 @@ async function getOverview(business, query, user) {
   const { startDate, endDate } = getPeriodDates(query);
   return withBusinessContext(business, async (client) => {
     const [revenue, stock, deliveries, crm, notifications] = await Promise.all([
-      client.query(
-        `SELECT COALESCE(SUM(total_amount),0) AS revenue,
-                COUNT(*) AS invoices
-         FROM invoices WHERE issue_date BETWEEN $1 AND $2
-           AND status != 'voided' AND is_deleted=false`,
-        [startDate, endDate],
-      ),
-      client.query(
-        `SELECT COUNT(*) AS low_stock_alerts
-         FROM products p
-         LEFT JOIN (
-           SELECT product_id, COALESCE(SUM(quantity*direction),0) AS qty
-           FROM stock_movements GROUP BY product_id
-         ) s ON s.product_id=p.product_id
-         WHERE p.is_deleted=false AND p.is_active=true
-           AND COALESCE(s.qty,0) <= p.reorder_level`,
-      ),
-      client.query(
-        `SELECT COUNT(*) FILTER (WHERE status='pending_dispatch') AS pending_dispatch,
-                COUNT(*) FILTER (WHERE status='failed')          AS failed
-         FROM deliveries WHERE created_at::DATE >= CURRENT_DATE - INTERVAL '7 days'`,
-      ),
-      client.query(
-        `SELECT COUNT(*) AS open_deals,
-                COALESCE(SUM(expected_value),0) AS pipeline_value
-         FROM crm_deals WHERE is_deleted=false AND won_at IS NULL AND lost_at IS NULL`,
-      ),
-      client.query(
-        `SELECT COUNT(*) AS unread
-         FROM shared.notifications
-         WHERE user_id=$1 AND is_read=false`,
-        [user.user_id],
-      ),
+      repo.getOverviewRevenue(client, { startDate, endDate }),
+      repo.getOverviewStock(client),
+      repo.getOverviewDeliveries(client),
+      repo.getOverviewCRM(client),
+      repo.getUnreadNotifications(client, user.user_id),
     ]);
-
     return {
       period: { startDate, endDate },
-      revenue: revenue.rows[0],
-      stock: stock.rows[0],
-      deliveries: deliveries.rows[0],
-      crm: crm.rows[0],
-      notifications: notifications.rows[0],
+      revenue,
+      stock,
+      deliveries,
+      crm,
+      notifications,
     };
   });
 }

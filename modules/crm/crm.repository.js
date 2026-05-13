@@ -1,2 +1,218 @@
 "use strict";
-// TODO: crm repository
+
+async function listDeals(
+  client,
+  { stage, assignedTo, contactId, limit, offset },
+) {
+  const { rows } = await client.query(
+    `SELECT d.deal_id, d.title, d.stage, d.expected_value, d.probability,
+            d.expected_close_date, d.source, d.created_at,
+            c.display_name AS contact_name, c.contact_id,
+            u.email AS assigned_to_email
+     FROM crm_deals d
+     JOIN shared.contacts c ON c.contact_id = d.contact_id
+     LEFT JOIN shared.users u ON u.user_id = d.assigned_to
+     WHERE d.is_deleted = false
+       AND ($1::TEXT IS NULL OR d.stage = $1)
+       AND ($2::UUID IS NULL OR d.assigned_to = $2)
+       AND ($3::UUID IS NULL OR d.contact_id = $3)
+     ORDER BY d.updated_at DESC
+     LIMIT $4 OFFSET $5`,
+    [stage || null, assignedTo || null, contactId || null, limit, offset],
+  );
+  return rows;
+}
+
+async function insertDeal(
+  client,
+  {
+    contact_id,
+    assigned_to,
+    title,
+    stage,
+    expected_value,
+    probability,
+    expected_close_date,
+    source,
+  },
+) {
+  const {
+    rows: [deal],
+  } = await client.query(
+    `INSERT INTO crm_deals
+       (contact_id, assigned_to, title, stage, expected_value,
+        probability, expected_close_date, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     RETURNING *`,
+    [
+      contact_id,
+      assigned_to,
+      title,
+      stage,
+      expected_value || null,
+      probability || 50,
+      expected_close_date || null,
+      source || null,
+    ],
+  );
+  return deal;
+}
+
+async function findDealById(client, dealId) {
+  const {
+    rows: [deal],
+  } = await client.query(
+    `SELECT d.*,
+            c.display_name AS contact_name, c.email, c.primary_phone,
+            c.whatsapp_number, c.priority_level,
+            u.email AS assigned_to_email,
+            json_agg(DISTINCT da.*) FILTER (WHERE da.activity_id IS NOT NULL) AS activities,
+            json_agg(DISTINCT dn.*) FILTER (WHERE dn.note_id    IS NOT NULL) AS notes
+     FROM crm_deals d
+     JOIN shared.contacts c ON c.contact_id = d.contact_id
+     LEFT JOIN shared.users u ON u.user_id = d.assigned_to
+     LEFT JOIN crm_activities da ON da.deal_id = d.deal_id
+     LEFT JOIN crm_notes      dn ON dn.deal_id = d.deal_id
+     WHERE d.deal_id = $1 AND d.is_deleted = false
+     GROUP BY d.deal_id, c.display_name, c.email, c.primary_phone,
+              c.whatsapp_number, c.priority_level, u.email`,
+    [dealId],
+  );
+  return deal || null;
+}
+
+async function updateDeal(client, dealId, sets, vals) {
+  const {
+    rows: [deal],
+  } = await client.query(
+    `UPDATE crm_deals SET ${sets.join(", ")}, updated_at = now()
+     WHERE deal_id = $${vals.length} AND is_deleted = false RETURNING *`,
+    vals,
+  );
+  return deal || null;
+}
+
+async function getDealStage(client, dealId) {
+  const {
+    rows: [old],
+  } = await client.query(`SELECT stage FROM crm_deals WHERE deal_id = $1`, [
+    dealId,
+  ]);
+  return old || null;
+}
+
+async function moveDealStage(client, dealId, newStage) {
+  const {
+    rows: [deal],
+  } = await client.query(
+    `UPDATE crm_deals
+     SET stage = $1,
+         won_at  = CASE WHEN $1 = 'completed' OR $1 = 'delivered' THEN now() ELSE won_at END,
+         lost_at = CASE WHEN $1 = 'lost'                          THEN now() ELSE lost_at END,
+         updated_at = now()
+     WHERE deal_id = $2 AND is_deleted = false RETURNING *`,
+    [newStage, dealId],
+  );
+  return deal || null;
+}
+
+async function insertActivity(
+  client,
+  { dealId, activity_type, summary, direction, userId, is_auto },
+) {
+  const {
+    rows: [activity],
+  } = await client.query(
+    `INSERT INTO crm_activities
+       (deal_id, contact_id, activity_type, summary, direction, performed_by, is_auto)
+     SELECT $1, d.contact_id, $2, $3, $4, $5, $6 FROM crm_deals d WHERE d.deal_id = $1
+     RETURNING *`,
+    [
+      dealId,
+      activity_type,
+      summary,
+      direction || null,
+      userId || null,
+      is_auto || false,
+    ],
+  );
+  return activity;
+}
+
+async function getPipelineStages(client, business) {
+  const { rows } = await client.query(
+    `SELECT stage_key, stage_label, colour, display_order, is_terminal
+     FROM shared.pipeline_stage_defs
+     WHERE business = $1 AND pipeline_type = 'crm'
+     ORDER BY display_order`,
+    [business],
+  );
+  return rows;
+}
+
+async function getPipelineDeals(client, { scope, userId }) {
+  const { rows } = await client.query(
+    `SELECT d.deal_id, d.title, d.stage, d.expected_value, d.probability,
+            d.expected_close_date, d.updated_at,
+            c.display_name AS contact_name, c.priority_level
+     FROM crm_deals d
+     JOIN shared.contacts c ON c.contact_id = d.contact_id
+     WHERE d.is_deleted = false
+       AND d.stage NOT IN ('completed','delivered','won','lost')
+       AND ($1 = 'all' OR d.assigned_to = $2)
+     ORDER BY d.updated_at DESC`,
+    [scope, userId],
+  );
+  return rows;
+}
+
+async function getNotes(client, dealId) {
+  const { rows } = await client.query(
+    `SELECT n.*, u.email AS created_by_email
+     FROM crm_notes n
+     LEFT JOIN shared.users u ON u.user_id = n.created_by
+     WHERE n.deal_id = $1
+     ORDER BY n.is_pinned DESC, n.created_at DESC`,
+    [dealId],
+  );
+  return rows;
+}
+
+async function getDealContactId(client, dealId) {
+  const {
+    rows: [deal],
+  } = await client.query(
+    `SELECT contact_id FROM crm_deals WHERE deal_id = $1`,
+    [dealId],
+  );
+  return deal?.contact_id || null;
+}
+
+async function insertNote(
+  client,
+  { dealId, contactId, content, is_pinned, userId },
+) {
+  const {
+    rows: [note],
+  } = await client.query(
+    `INSERT INTO crm_notes (deal_id, contact_id, content, is_pinned, created_by)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [dealId, contactId, content, is_pinned, userId],
+  );
+  return note;
+}
+
+module.exports = {
+  listDeals,
+  insertDeal,
+  findDealById,
+  updateDeal,
+  getDealStage,
+  moveDealStage,
+  insertActivity,
+  getPipelineStages,
+  getPipelineDeals,
+  getNotes,
+  getDealContactId,
+  insertNote,
+};

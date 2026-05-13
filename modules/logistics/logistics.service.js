@@ -8,6 +8,7 @@ const auditService = require("../../shared/audit/audit.service");
 const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
 const { emitToBusiness } = require("../../config/sockets");
 const logger = require("../../config/logger");
+const repo = require("./logistics.repository");
 
 async function listDeliveries(
   business,
@@ -15,39 +16,20 @@ async function listDeliveries(
 ) {
   return withBusinessContext(business, async (client) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const { rows } = await client.query(
-      `SELECT d.delivery_id, d.delivery_number, d.status, d.courier,
-              d.delivery_fee, d.dispatched_at, d.delivered_at, d.created_at,
-              c.display_name AS contact_name, c.primary_phone
-       FROM deliveries d
-       JOIN shared.contacts c ON c.contact_id = d.contact_id
-       WHERE ($1::TEXT IS NULL OR d.status  = $1)
-         AND ($2::TEXT IS NULL OR d.courier = $2)
-       ORDER BY d.created_at DESC
-       LIMIT $3 OFFSET $4`,
-      [status || null, courier || null, parseInt(limit), offset],
-    );
-    return { data: rows };
+    return {
+      data: await repo.listDeliveries(client, {
+        status,
+        courier,
+        limit: parseInt(limit),
+        offset,
+      }),
+    };
   });
 }
 
 async function getDelivery(business, deliveryId) {
   return withBusinessContext(business, async (client) => {
-    const {
-      rows: [delivery],
-    } = await client.query(
-      `SELECT d.*,
-              c.display_name AS contact_name, c.primary_phone, c.whatsapp_number,
-              json_agg(di.* ORDER BY di.item_id) FILTER (WHERE di.item_id IS NOT NULL) AS items,
-              json_agg(dt.* ORDER BY dt.occurred_at DESC) FILTER (WHERE dt.track_id IS NOT NULL) AS tracking_history
-       FROM deliveries d
-       JOIN shared.contacts c ON c.contact_id = d.contact_id
-       LEFT JOIN delivery_items    di ON di.delivery_id = d.delivery_id
-       LEFT JOIN delivery_tracking dt ON dt.delivery_id = d.delivery_id
-       WHERE d.delivery_id = $1
-       GROUP BY d.delivery_id, c.display_name, c.primary_phone, c.whatsapp_number`,
-      [deliveryId],
-    );
+    const delivery = await repo.findDeliveryById(client, deliveryId);
     if (!delivery)
       throw Object.assign(new Error("Delivery not found"), { status: 404 });
     return delivery;
@@ -61,86 +43,50 @@ async function createDelivery(business, data, user) {
       business,
       "delivery",
     );
+    const delivery = await repo.insertDelivery(client, {
+      deliveryNumber,
+      reference_type: data.reference_type,
+      reference_id: data.reference_id,
+      contact_id: data.contact_id,
+      delivery_address: data.delivery_address,
+      courier: data.courier,
+      deliveryFee: data.delivery_fee || 0,
+      fee_borne_by: data.fee_borne_by,
+      userId: user.user_id,
+    });
 
-    // Calculate delivery fee if courier supports it
-    let deliveryFee = data.delivery_fee || 0;
-
-    const {
-      rows: [delivery],
-    } = await client.query(
-      `INSERT INTO deliveries
-         (delivery_number, reference_type, reference_id, contact_id,
-          delivery_address, courier, status, delivery_fee,
-          fee_borne_by, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,'pending_dispatch',$7,$8,$9)
-       RETURNING *`,
-      [
-        deliveryNumber,
-        data.reference_type,
-        data.reference_id,
-        data.contact_id,
-        typeof data.delivery_address === "string"
-          ? JSON.stringify({ line1: data.delivery_address })
-          : JSON.stringify(data.delivery_address),
-        data.courier,
-        deliveryFee,
-        data.fee_borne_by || "customer",
-        user.user_id,
-      ],
-    );
-
-    // Add items from source document
     if (data.items && data.items.length) {
       for (const item of data.items) {
-        await client.query(
-          `INSERT INTO delivery_items (delivery_id, product_id, description, quantity)
-           VALUES ($1,$2,$3,$4)`,
-          [
-            delivery.delivery_id,
-            item.product_id || null,
-            item.description,
-            item.quantity,
-          ],
-        );
+        await repo.insertDeliveryItem(client, {
+          delivery_id: delivery.delivery_id,
+          product_id: item.product_id,
+          description: item.description,
+          quantity: item.quantity,
+        });
       }
     } else {
-      // Auto-pull items from order/POS transaction
-      if (data.reference_type === "sales_order") {
-        const { rows: lines } = await client.query(
-          `SELECT product_id, description, quantity FROM order_lines
-           WHERE order_id = $1 AND status = 'pending'`,
-          [data.reference_id],
-        );
-        for (const l of lines) {
-          await client.query(
-            `INSERT INTO delivery_items (delivery_id, product_id, description, quantity)
-             VALUES ($1,$2,$3,$4)`,
-            [delivery.delivery_id, l.product_id, l.description, l.quantity],
-          );
-        }
-      } else if (data.reference_type === "pos_transaction") {
-        const { rows: lines } = await client.query(
-          `SELECT product_id, description, quantity FROM pos_transaction_lines
-           WHERE transaction_id = $1`,
-          [data.reference_id],
-        );
-        for (const l of lines) {
-          await client.query(
-            `INSERT INTO delivery_items (delivery_id, product_id, description, quantity)
-             VALUES ($1,$2,$3,$4)`,
-            [delivery.delivery_id, l.product_id, l.description, l.quantity],
-          );
-        }
+      const lines =
+        data.reference_type === "sales_order"
+          ? await repo.getOrderLines(client, data.reference_id)
+          : data.reference_type === "pos_transaction"
+            ? await repo.getPOSLines(client, data.reference_id)
+            : [];
+      for (const l of lines) {
+        await repo.insertDeliveryItem(client, {
+          delivery_id: delivery.delivery_id,
+          product_id: l.product_id,
+          description: l.description,
+          quantity: l.quantity,
+        });
       }
     }
 
-    // Initial tracking entry
-    await client.query(
-      `INSERT INTO delivery_tracking (delivery_id, status, source, message)
-       VALUES ($1, 'pending_dispatch', 'system', 'Delivery created and awaiting dispatch')`,
-      [delivery.delivery_id],
-    );
-
+    await repo.insertTrackingEntry(client, {
+      delivery_id: delivery.delivery_id,
+      status: "pending_dispatch",
+      source: "system",
+      message: "Delivery created and awaiting dispatch",
+    });
     await auditService.log(client, {
       userId: user.user_id,
       userName: "staff",
@@ -151,38 +97,20 @@ async function createDelivery(business, data, user) {
       recordId: delivery.delivery_id,
       after: delivery,
     });
-
     return delivery;
   });
 }
 
 async function dispatchDelivery(business, deliveryId, user) {
   return withBusinessContext(business, async (client) => {
-    const {
-      rows: [delivery],
-    } = await client.query(
-      `SELECT d.*, c.display_name, c.primary_phone, c.whatsapp_number
-       FROM deliveries d
-       JOIN shared.contacts c ON c.contact_id = d.contact_id
-       WHERE d.delivery_id = $1 AND d.status = 'pending_dispatch'`,
-      [deliveryId],
-    );
+    const delivery = await repo.findDispatchable(client, deliveryId);
     if (!delivery)
       throw Object.assign(
         new Error("Delivery not found or not ready to dispatch"),
         { status: 400 },
       );
 
-    // Fetch items
-    const { rows: items } = await client.query(
-      `SELECT di.*, p.name, p.weight_grams
-       FROM delivery_items di
-       LEFT JOIN products p ON p.product_id = di.product_id
-       WHERE di.delivery_id = $1`,
-      [deliveryId],
-    );
-
-    // Book courier
+    const items = await repo.getDeliveryItems(client, deliveryId);
     const booking = await courierService.bookCourier({
       courier: delivery.courier,
       delivery: { ...delivery, pickup_address: "Hub Warehouse, Lagos" },
@@ -197,18 +125,12 @@ async function dispatchDelivery(business, deliveryId, user) {
       })),
     });
 
-    // Update delivery with courier reference
-    const {
-      rows: [updated],
-    } = await client.query(
-      `UPDATE deliveries
-       SET status='dispatched', courier_order_id=$1, waybill_number=$2,
-           dispatched_at=now(), updated_at=now()
-       WHERE delivery_id=$3 RETURNING *`,
-      [booking.courierId || null, booking.waybill || null, deliveryId],
-    );
+    const updated = await repo.setDispatched(client, {
+      deliveryId,
+      courierId: booking.courierId,
+      waybill: booking.waybill,
+    });
 
-    // Deduct stock from warehouse on dispatch
     for (const item of items) {
       if (item.product_id) {
         await stockService
@@ -222,11 +144,10 @@ async function dispatchDelivery(business, deliveryId, user) {
             referenceId: deliveryId,
             performedBy: user.user_id,
           })
-          .catch(() => {}); // Non-fatal — stock may have already been deducted at POS
+          .catch(() => {});
       }
     }
 
-    // Notify customer via WhatsApp if available
     if (delivery.whatsapp_number) {
       await whatsapp
         .sendMessage({
@@ -243,43 +164,27 @@ async function dispatchDelivery(business, deliveryId, user) {
       courierId: booking.courierId,
       status: "dispatched",
     });
-
     return updated;
   });
 }
 
 async function markDelivered(business, deliveryId, user) {
   return withBusinessContext(business, async (client) => {
-    const {
-      rows: [delivery],
-    } = await client.query(
-      `UPDATE deliveries
-       SET status='delivered', delivered_at=now(), updated_at=now()
-       WHERE delivery_id=$1 AND status IN ('dispatched','picked_up','in_transit')
-       RETURNING *`,
-      [deliveryId],
-    );
+    const delivery = await repo.setDelivered(client, deliveryId);
     if (!delivery)
       throw Object.assign(
         new Error("Delivery not found or cannot be marked delivered"),
         { status: 400 },
       );
 
-    await client.query(
-      `INSERT INTO delivery_tracking (delivery_id, status, source, message)
-       VALUES ($1,'delivered','manual','Marked as delivered by staff')`,
-      [deliveryId],
-    );
+    await repo.insertTrackingEntry(client, {
+      delivery_id: deliveryId,
+      status: "delivered",
+      source: "manual",
+      message: "Marked as delivered by staff",
+    });
 
-    // Notify customer
-    const {
-      rows: [contact],
-    } = await client.query(
-      `SELECT c.whatsapp_number, c.display_name
-       FROM deliveries d JOIN shared.contacts c ON c.contact_id = d.contact_id
-       WHERE d.delivery_id=$1`,
-      [deliveryId],
-    );
+    const contact = await repo.getDeliveryContact(client, deliveryId);
     if (contact?.whatsapp_number) {
       await whatsapp
         .sendMessage({
@@ -296,34 +201,23 @@ async function markDelivered(business, deliveryId, user) {
 
 async function markFailed(business, deliveryId, { failure_reason }, user) {
   return withBusinessContext(business, async (client) => {
-    const {
-      rows: [delivery],
-    } = await client.query(
-      `UPDATE deliveries
-       SET status='failed', failure_reason=$1, updated_at=now()
-       WHERE delivery_id=$2 AND status NOT IN ('delivered','returned')
-       RETURNING *`,
-      [failure_reason, deliveryId],
-    );
+    const delivery = await repo.setFailed(client, {
+      deliveryId,
+      failure_reason,
+    });
     if (!delivery)
       throw Object.assign(new Error("Cannot update this delivery"), {
         status: 400,
       });
 
-    await client.query(
-      `INSERT INTO delivery_tracking (delivery_id, status, source, message)
-       VALUES ($1,'failed','manual',$2)`,
-      [deliveryId, `Delivery failed: ${failure_reason}`],
-    );
+    await repo.insertTrackingEntry(client, {
+      delivery_id: deliveryId,
+      status: "failed",
+      source: "manual",
+      message: `Delivery failed: ${failure_reason}`,
+    });
 
-    // Notify logistics team
-    const { rows: managers } = await client.query(
-      `SELECT u.user_id FROM shared.users u
-       JOIN shared.user_roles ur ON ur.user_id=u.user_id
-       JOIN shared.roles r ON r.role_id=ur.role_id
-       WHERE r.role_name IN ('owner','manager','logistics') AND (ur.business=$1 OR ur.business='*')`,
-      [business],
-    );
+    const managers = await repo.getLogisticsManagers(client, business);
     for (const m of managers) {
       await notifService.create(client, {
         userId: m.user_id,
@@ -343,14 +237,7 @@ async function markFailed(business, deliveryId, { failure_reason }, user) {
 
 async function getTracking(business, deliveryId) {
   return withBusinessContext(business, async (client) => {
-    const { rows } = await client.query(
-      `SELECT track_id, status, location, message, source, occurred_at
-       FROM delivery_tracking
-       WHERE delivery_id=$1
-       ORDER BY occurred_at DESC`,
-      [deliveryId],
-    );
-    return { data: rows };
+    return { data: await repo.getTracking(client, deliveryId) };
   });
 }
 
