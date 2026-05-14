@@ -103,6 +103,108 @@ router.post(
   },
 );
 
+// Build audience from a saved segment — convenience that copies the
+// segment's filter onto the campaign and runs buildAudience.
+router.post(
+  "/:id/build-audience-from-segment",
+  param("id").isUUID(),
+  body("segment_id").isUUID(),
+  validate,
+  can("campaigns", "edit"),
+  async (req, res, next) => {
+    try {
+      res.json(
+        await service.buildAudienceFromSegment(
+          req.business,
+          req.params.id,
+          req.body.segment_id,
+        ),
+      );
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── SAVED SEGMENTS ───────────────────────────────────────────
+
+router.get("/segments", can("campaigns", "view"), async (req, res, next) => {
+  try {
+    res.json({ data: await service.listSegments(req.business) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get(
+  "/segments/:segmentId",
+  param("segmentId").isUUID(),
+  validate,
+  can("campaigns", "view"),
+  async (req, res, next) => {
+    try {
+      const row = await service.getSegment(req.business, req.params.segmentId);
+      if (!row) return res.status(404).json({ message: "Segment not found" });
+      res.json(row);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+router.get(
+  "/segments/:segmentId/preview",
+  param("segmentId").isUUID(),
+  query("channel_type").optional().isIn(["email", "whatsapp", "auto"]),
+  validate,
+  can("campaigns", "view"),
+  async (req, res, next) => {
+    try {
+      res.json(
+        await service.previewSegment(
+          req.business,
+          req.params.segmentId,
+          req.query.channel_type,
+        ),
+      );
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+router.post(
+  "/segments",
+  body("name").isString().notEmpty(),
+  body("filter").isObject(),
+  body("description").optional().isString(),
+  validate,
+  can("campaigns", "create"),
+  async (req, res, next) => {
+    try {
+      res
+        .status(201)
+        .json(await service.saveSegment(req.business, req.body, req.user));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+router.delete(
+  "/segments/:segmentId",
+  param("segmentId").isUUID(),
+  validate,
+  can("campaigns", "delete"),
+  async (req, res, next) => {
+    try {
+      res.json(await service.deleteSegment(req.business, req.params.segmentId));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // ─── SCHEDULING ───────────────────────────────────────────────
 
 router.post(
@@ -225,6 +327,36 @@ router.get(
   async (req, res, next) => {
     try {
       res.json(await service.getAbTestResults(req.business, req.params.id));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Create an A/B variant of a campaign — child links to parent via
+// parent_campaign_id. Results aggregate via the /ab-results endpoint
+// when called with the parent's ID.
+router.post(
+  "/:id/variants",
+  param("id").isUUID(),
+  body("subject_line").optional().isString(),
+  body("campaign_name").optional().isString(),
+  body("html_content").optional().isString(),
+  body("audience_filter").optional().isObject(),
+  validate,
+  can("campaigns", "create"),
+  async (req, res, next) => {
+    try {
+      res
+        .status(201)
+        .json(
+          await service.createVariant(
+            req.business,
+            req.params.id,
+            req.body,
+            req.user,
+          ),
+        );
     } catch (err) {
       next(err);
     }

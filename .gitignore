@@ -35,3 +35,4 @@ certs/*.crt
 coverage/
 audit.md
 schema-two.html
+build_pixie_tech_arch.js
