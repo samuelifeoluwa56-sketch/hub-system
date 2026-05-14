@@ -5,6 +5,7 @@ const config = require("./config/config");
 const { shutdown: dbShutdown } = require("./config/db");
 const { shutdown: redisShutdown } = require("./config/redis");
 const { init: initSockets } = require("./config/sockets");
+const businesses = require("./config/businesses");
 const logger = require("./config/logger");
 const jobRunner = require("./jobs/index");
 const http = require("http");
@@ -12,12 +13,29 @@ const http = require("http");
 const server = http.createServer(app);
 
 initSockets(server);
-jobRunner.start();
 
-server.listen(config.app.port, () => {
-  logger.info(
-    `Hub server running on port ${config.app.port} [${config.app.env}]`,
-  );
+// Load the active business list BEFORE the listener binds. Hot-path
+// validators (db.js withBusinessContext, middleware/businessContext,
+// shared/auth/switchBusiness, config/sockets) read from this cache
+// synchronously — if it's empty when the first request lands, every
+// request to a business schema route fails with "Invalid business".
+//
+// loadActiveBusinesses falls back to config.app.businesses if the DB
+// is unreachable at boot, so this never blocks startup indefinitely.
+async function start() {
+  await businesses.loadActiveBusinesses();
+  jobRunner.start();
+
+  server.listen(config.app.port, () => {
+    logger.info(
+      `Hub server running on port ${config.app.port} [${config.app.env}]`,
+    );
+  });
+}
+
+start().catch((err) => {
+  logger.error("Startup failed", err);
+  process.exit(1);
 });
 
 async function shutdown(signal) {

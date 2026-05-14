@@ -2,9 +2,10 @@
 const { withBusinessContext } = require("../config/db");
 const { sendEmail } = require("../lib/email/sender");
 const logger = require("../config/logger");
+const { getActiveBusinesses } = require("../config/businesses");
 
 module.exports = async function sendPaymentReminders() {
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     await withBusinessContext(business, async (client) => {
       // Invoices overdue 1, 3, 7 days — send reminder
       const { rows } = await client.query(`

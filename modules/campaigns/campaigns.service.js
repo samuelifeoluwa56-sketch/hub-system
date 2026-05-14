@@ -1,12 +1,23 @@
 "use strict";
 
 const { withBusinessContext } = require("../../config/db");
-const { sendEmail } = require("../../lib/email/sender");
-const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
 const auditService = require("../../shared/audit/audit.service");
+const builder = require("./builder.service");
+const scheduler = require("./scheduler.service");
+const tracking = require("./tracking.service");
 const repo = require("./campaigns.repository");
-const crypto = require("crypto");
-const logger = require("../../config/logger");
+
+// ─────────────────────────────────────────────────────────────
+// Campaigns service — coordination layer for the email/WhatsApp
+// campaigns module. Heavy lifting in three sub-services:
+//
+//   - builder.service.js   → audience filter compilation, segments
+//   - scheduler.service.js → schedule queue, batched send, cron entry
+//   - tracking.service.js  → open/click/unsubscribe events, stats
+//
+// This file handles CRUD on the campaigns table itself and exposes
+// a stable public API that the route file binds to.
+// ─────────────────────────────────────────────────────────────
 
 async function list(
   business,
@@ -38,7 +49,7 @@ async function create(business, data, user) {
 
     await auditService.log(client, {
       userId: user.user_id,
-      userName: "staff",
+      userName: user.display_name || "staff",
       business,
       module: "campaigns",
       action: "create",
@@ -93,184 +104,91 @@ async function update(business, campaignId, data, user) {
   });
 }
 
-// Build the audience from the filter criteria and insert campaign_recipients
-async function buildAudience(business, campaignId) {
-  return withBusinessContext(business, async (client) => {
-    const campaign = await repo.findAudienceFilter(client, campaignId);
-    if (!campaign) throw Object.assign(new Error("Not found"), { status: 404 });
+// ─── AUDIENCE (delegated to builder) ──────────────────────────
 
-    const filter = campaign.audience_filter || {};
-    let where = `c.is_deleted = false AND c.visible_to @> ARRAY[$1]`;
-    const params = [business];
-
-    if (filter.priority_level) {
-      params.push(filter.priority_level);
-      where += ` AND c.priority_level = $${params.length}`;
-    }
-    if (filter.contact_type) {
-      params.push(filter.contact_type);
-      where += ` AND $${params.length} = ANY(c.contact_type)`;
-    }
-    if (campaign.campaign_type === "email") {
-      where += ` AND c.email IS NOT NULL`;
-    } else if (campaign.campaign_type === "whatsapp") {
-      where += ` AND c.whatsapp_number IS NOT NULL`;
-    }
-
-    const contacts = await repo.getContactsForAudience(client, {
-      business,
-      where,
-      params,
-    });
-
-    await repo.deletePendingRecipients(client, campaignId);
-
-    let inserted = 0;
-    for (const contact of contacts) {
-      const token = crypto.randomBytes(16).toString("hex");
-      await repo.insertRecipient(client, campaignId, contact.contact_id, token);
-      inserted++;
-    }
-
-    await repo.updateRecipientCount(client, campaignId, inserted);
-    return {
-      recipient_count: inserted,
-      message: "Audience built successfully",
-    };
-  });
+async function previewAudience(business, filter, channelType) {
+  return builder.previewAudience(business, filter, channelType);
 }
 
+async function buildAudience(business, campaignId) {
+  return builder.buildAudience(business, campaignId);
+}
+
+// Saved segments — reusable named audience filters.
+async function listSegments(business) {
+  return builder.listSegments(business);
+}
+
+async function getSegment(business, segmentId) {
+  return builder.getSegment(business, segmentId);
+}
+
+async function saveSegment(business, data, user) {
+  return builder.saveSegment(business, data, user);
+}
+
+async function deleteSegment(business, segmentId) {
+  return builder.deleteSegment(business, segmentId);
+}
+
+async function previewSegment(business, segmentId, channelType) {
+  return builder.previewSegment(business, segmentId, channelType);
+}
+
+async function buildAudienceFromSegment(business, campaignId, segmentId) {
+  return builder.buildAudienceFromSegment(business, campaignId, segmentId);
+}
+
+// ─── SCHEDULING (delegated to scheduler) ──────────────────────
+
 async function schedule(business, campaignId, scheduledAt, user) {
-  return withBusinessContext(business, async (client) => {
-    const c = await repo.findStatusById(client, campaignId);
-    if (!c) throw Object.assign(new Error("Not found"), { status: 404 });
-    if (!["draft"].includes(c.status)) {
-      throw Object.assign(new Error("Only draft campaigns can be scheduled"), {
-        status: 400,
-      });
-    }
-    if (!c.recipient_count) {
-      throw Object.assign(new Error("Build audience first before scheduling"), {
-        status: 400,
-      });
-    }
-    return repo.setScheduled(client, campaignId, scheduledAt);
-  });
+  return scheduler.schedule(business, campaignId, scheduledAt, user);
 }
 
 async function sendNow(business, campaignId, user) {
-  return withBusinessContext(business, async (client) => {
-    const campaign = await repo.findSendable(client, campaignId);
-    if (!campaign)
-      throw Object.assign(new Error("Campaign not sendable"), { status: 400 });
-
-    if (!campaign.recipient_count) {
-      await buildAudience(business, campaignId);
-    }
-
-    await repo.setStatus(client, campaignId, "sending");
-
-    setImmediate(() =>
-      processSend(business, campaignId, campaign).catch((err) => {
-        logger.error(`Campaign send failed: ${campaignId}`, err);
-      }),
-    );
-
-    return { message: "Campaign is now sending", campaign_id: campaignId };
-  });
-}
-
-// Internal: send to all pending recipients
-async function processSend(business, campaignId, campaign) {
-  const { withBusinessContext } = require("../../config/db");
-
-  await withBusinessContext(business, async (client) => {
-    const recipients = await repo.getPendingRecipients(client, campaignId);
-    let sentCount = 0;
-
-    for (const r of recipients) {
-      try {
-        let personalHtml = campaign.html_content.replace(
-          /\{\{name\}\}/g,
-          r.display_name || "Valued Customer",
-        );
-
-        if (campaign.campaign_type === "email") {
-          const trackUrl = `${process.env.BASE_URL || "http://localhost:3000"}/api/campaigns/track/${r.tracking_token}?type=opened`;
-          personalHtml += `<img src="${trackUrl}" width="1" height="1" alt="" />`;
-          await sendEmail({
-            to: r.email,
-            subject: campaign.subject_line,
-            html: personalHtml,
-            from: campaign.from_name,
-          });
-        } else if (campaign.campaign_type === "whatsapp" && r.whatsapp_number) {
-          await whatsapp.sendMessage({
-            to: r.whatsapp_number,
-            text: personalHtml.replace(/<[^>]*>/g, ""),
-          });
-        }
-
-        await repo.markRecipientSent(client, r.recipient_id);
-        sentCount++;
-      } catch (err) {
-        logger.error(`Campaign recipient failed: ${r.contact_id}`, err);
-        await repo.markRecipientBounced(client, r.recipient_id);
-      }
-    }
-
-    await repo.setSentTotals(client, campaignId, sentCount);
-    logger.info(
-      `Campaign sent: ${campaignId} — ${sentCount}/${recipients.length} delivered`,
-    );
-  });
+  return scheduler.sendNow(business, campaignId, user);
 }
 
 async function cancel(business, campaignId, user) {
-  return withBusinessContext(business, async (client) => {
-    const c = await repo.setCancelled(client, campaignId);
-    if (!c)
-      throw Object.assign(new Error("Campaign cannot be cancelled"), {
-        status: 400,
-      });
-    return c;
-  });
+  return scheduler.cancel(business, campaignId, user);
+}
+
+// ─── TRACKING (delegated to tracking) ─────────────────────────
+
+async function trackEvent(token, eventType, metadata) {
+  return tracking.recordEvent(token, eventType, metadata);
+}
+
+async function handlePixelOpen(token, metadata) {
+  return tracking.handlePixelOpen(token, metadata);
+}
+
+async function handleClick(token, targetUrl, metadata) {
+  return tracking.handleClick(token, targetUrl, metadata);
+}
+
+async function handleUnsubscribe(token, metadata) {
+  return tracking.handleUnsubscribe(token, metadata);
 }
 
 async function getStats(business, campaignId) {
-  return withBusinessContext(business, async (client) => {
-    return repo.getStats(client, campaignId);
-  });
+  return tracking.getCampaignStats(business, campaignId);
 }
 
-async function trackEvent(token, eventType, ip) {
-  return withBusinessContext("jewelry", async () => {
-    const db = require("../../config/db");
-    for (const business of ["jewelry", "diffusers"]) {
-      const r = await repo.findRecipientByToken(db.pool, business, token);
-      if (!r) continue;
+async function getRecipientActivity(business, campaignId, opts) {
+  return tracking.getRecipientActivity(business, campaignId, opts);
+}
 
-      const validEvents = ["opened", "clicked"];
-      if (!validEvents.includes(eventType)) return;
+async function getFollowUpSuggestions(business, campaignId) {
+  return tracking.getFollowUpSuggestions(business, campaignId);
+}
 
-      await repo.updateTrackingEvent(db.pool, business, token, eventType);
+async function getAbTestResults(business, parentCampaignId) {
+  return tracking.getAbTestResults(business, parentCampaignId);
+}
 
-      const col = eventType === "opened" ? "opened_count" : "clicked_count";
-      await repo.incrementCampaignCounter(
-        db.pool,
-        business,
-        r.campaign_id,
-        col,
-      );
-      await repo.insertCampaignEvent(
-        db.pool,
-        business,
-        r.recipient_id,
-        eventType,
-      );
-      return;
-    }
-  }).catch(() => {});
+async function createVariant(business, parentCampaignId, variantData, user) {
+  return tracking.createVariant(business, parentCampaignId, variantData, user);
 }
 
 module.exports = {
@@ -278,10 +196,28 @@ module.exports = {
   create,
   getById,
   update,
+  // audience
+  previewAudience,
   buildAudience,
+  // saved segments
+  listSegments,
+  getSegment,
+  saveSegment,
+  deleteSegment,
+  previewSegment,
+  buildAudienceFromSegment,
+  // scheduling
   schedule,
   sendNow,
   cancel,
-  getStats,
+  // tracking
   trackEvent,
+  handlePixelOpen,
+  handleClick,
+  handleUnsubscribe,
+  getStats,
+  getRecipientActivity,
+  getFollowUpSuggestions,
+  getAbTestResults,
+  createVariant,
 };

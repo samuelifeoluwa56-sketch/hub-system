@@ -1,6 +1,7 @@
 "use strict";
 const { withBusinessContext } = require("../config/db");
 const logger = require("../config/logger");
+const { getActiveBusinesses } = require("../config/businesses");
 
 module.exports = async function generateFiscalPeriods() {
   const now = new Date();
@@ -13,7 +14,7 @@ module.exports = async function generateFiscalPeriods() {
   const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
   const endDate = new Date(year, month, 0).toISOString().split("T")[0]; // last day of month
 
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     await withBusinessContext(business, async (client) => {
       await client.query(
         `INSERT INTO fiscal_periods (name, period_type, start_date, end_date)

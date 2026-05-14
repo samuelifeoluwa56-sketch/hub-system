@@ -1,0 +1,49 @@
+-- ============================================================
+-- TEMPLATE — 000023_close_sprint3_schema_gaps.sql (per-business sections)
+--
+-- Applied by scripts/bootstrapBusiness.js. New businesses bootstrapped
+-- after Sprint 4 need the same per-business schema additions that
+-- migration 000023 applied to the original schemas.
+--
+-- Sections retained here (per-business):
+--   3a. parent_campaign_id column on campaigns (Module 13 A/B testing)
+--   4.  idx_*_stock_movements_product_time index (performance)
+--   5.  pos_sale → sold movement_type backfill (no-op on fresh schema)
+--
+-- Sections NOT in this template (shared, run once globally):
+--   1. DROP business_config JSONB columns
+--   2. ADD business_config Module 18 columns
+--   3b. CREATE TABLE shared.contact_segments
+-- ============================================================
+
+-- ─────────────────────────────────────────────────────────────
+-- 3. Campaigns — add the two items needed for full Module 13
+--    coverage: A/B variant linking and saved segments.
+-- ─────────────────────────────────────────────────────────────
+
+-- 3a. parent_campaign_id — enables proper A/B test variant linking.
+--     Variants link to their parent; getAbTestResults() aggregates
+--     across `WHERE campaign_id = $1 OR parent_campaign_id = $1`.
+
+ALTER TABLE {{BUSINESS}}.campaigns
+    ADD COLUMN IF NOT EXISTS parent_campaign_id uuid REFERENCES {{BUSINESS}}.campaigns(campaign_id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_{{BUSINESS}}_campaigns_parent
+    ON {{BUSINESS}}.campaigns(parent_campaign_id)
+    WHERE parent_campaign_id IS NOT NULL;
+-- ─────────────────────────────────────────────────────────────
+-- 4. stock_movements — performance index for the movement-history
+--    page. Without it, opening the movements tab on a product with
+--    a long history takes seconds.
+-- ─────────────────────────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_{{BUSINESS}}_stock_movements_product_time
+    ON {{BUSINESS}}.stock_movements(product_id, performed_at DESC);
+
+--    backfill is fast (single UPDATE per schema) and keeps
+--    movement-type queries simple going forward.
+-- ─────────────────────────────────────────────────────────────
+
+UPDATE {{BUSINESS}}.stock_movements
+    SET movement_type = 'sold'
+    WHERE movement_type = 'pos_sale';

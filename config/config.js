@@ -20,14 +20,22 @@ const config = {
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS || "http://localhost:3000"
     ).split(","),
-    businesses: ["jewelry", "diffusers"], // extend when adding new business line
+    // FALLBACK ONLY — the canonical active-business list is loaded
+    // dynamically from shared.business_config at startup by
+    // config/businesses.js. This array is only used:
+    //   (a) by scripts/migrations that run before the DB has business_config seeded
+    //   (b) as a degraded-mode fallback if the DB is unreachable at boot
+    // Adding a new business does NOT require editing this list —
+    // use POST /settings/businesses (with provision_schema: true) or
+    // scripts/bootstrapBusiness.js instead.
+    businesses: ["jewelry", "diffusers"],
   },
 
   pg: {
-    host: process.env.PG_HOST || "localhost",
-    port: parseInt(process.env.PG_PORT || "5432"),
-    database: process.env.PG_DATABASE || "hub_db",
-    user: process.env.PG_USER || "hub_app",
+    host: process.env.PG_HOST,
+    port: parseInt(process.env.PG_PORT),
+    database: process.env.PG_DATABASE,
+    user: process.env.PG_USER,
     password: process.env.PG_PASSWORD,
     ssl:
       process.env.NODE_ENV === "production"

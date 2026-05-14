@@ -33,3 +33,5 @@ certs/*.crt
 
 # Test coverage
 coverage/
+audit.md
+schema-two.html

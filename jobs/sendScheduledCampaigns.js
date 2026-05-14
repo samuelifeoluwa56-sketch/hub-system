@@ -2,9 +2,10 @@
 const { withBusinessContext } = require("../config/db");
 const { sendEmail } = require("../lib/email/sender");
 const logger = require("../config/logger");
+const { getActiveBusinesses } = require("../config/businesses");
 
 module.exports = async function sendScheduledCampaigns() {
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     await withBusinessContext(business, async (client) => {
       const { rows: campaigns } = await client.query(`
         SELECT campaign_id, campaign_name, campaign_type, subject_line,

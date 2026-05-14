@@ -1,0 +1,119 @@
+-- ============================================================
+-- TEMPLATE — 000012_business_invoicing.sql
+--
+-- Placeholders:
+--   {{BUSINESS}}  — new business schema name (lowercase, alnum+underscore)
+--
+-- Applied by scripts/bootstrapBusiness.js
+-- ============================================================
+
+-- ┌── JEWELRY ──────────────────────────────────────────────┐
+
+CREATE TABLE {{BUSINESS}}.invoices (
+  invoice_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_number        TEXT        NOT NULL UNIQUE,
+  invoice_type          TEXT        NOT NULL DEFAULT 'standard'
+                        CHECK (invoice_type IN ('standard','proforma','retail_partner_settlement')),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  order_id              UUID        REFERENCES {{BUSINESS}}.sales_orders (order_id) ON DELETE SET NULL,
+  pos_transaction_id    UUID        REFERENCES {{BUSINESS}}.pos_transactions (transaction_id) ON DELETE SET NULL,
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','sent','partially_paid','paid','overdue','voided')),
+  issue_date            DATE        NOT NULL DEFAULT CURRENT_DATE,
+  due_date              DATE        NOT NULL,
+  subtotal              NUMERIC(14,2) NOT NULL DEFAULT 0,
+  discount_total        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  vat_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_amount          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  amount_paid           NUMERIC(14,2) NOT NULL DEFAULT 0,
+  amount_outstanding    NUMERIC(14,2) GENERATED ALWAYS AS (total_amount - amount_paid) STORED,
+  currency              TEXT        NOT NULL DEFAULT 'NGN',
+  notes                 TEXT,
+  payment_instructions  TEXT,
+  sent_at               TIMESTAMPTZ,
+  paid_at               TIMESTAMPTZ,
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  is_deleted            BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_invoices_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.invoices
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+CREATE INDEX idx_{{BUSINESS}}_invoices_contact     ON {{BUSINESS}}.invoices (contact_id);
+CREATE INDEX idx_{{BUSINESS}}_invoices_status      ON {{BUSINESS}}.invoices (status)              WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_invoices_outstanding ON {{BUSINESS}}.invoices (amount_outstanding)  WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_invoices_due_date    ON {{BUSINESS}}.invoices (due_date, status)    WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_invoices_number      ON {{BUSINESS}}.invoices (invoice_number);
+
+CREATE TABLE {{BUSINESS}}.invoice_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.invoices (invoice_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  unit_price            NUMERIC(14,2) NOT NULL,
+  discount_amount       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  vat_rate              NUMERIC(5,4) NOT NULL DEFAULT 0.075,
+  vat_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  line_total            NUMERIC(14,2) NOT NULL,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_invoice_lines ON {{BUSINESS}}.invoice_lines (invoice_id);
+
+CREATE TABLE {{BUSINESS}}.invoice_payments (
+  payment_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.invoices (invoice_id),
+  payment_date          DATE        NOT NULL DEFAULT CURRENT_DATE,
+  amount                NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  payment_method        TEXT        NOT NULL
+                        CHECK (payment_method IN ('bank_transfer','pos_card','cash','paystack','flutterwave')),
+  reference             TEXT,
+  paystack_reference    TEXT,
+  flutterwave_reference TEXT,
+  is_confirmed          BOOLEAN     NOT NULL DEFAULT false,
+  confirmed_at          TIMESTAMPTZ,
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_invoice_payments_invoice  ON {{BUSINESS}}.invoice_payments (invoice_id);
+CREATE INDEX idx_{{BUSINESS}}_invoice_payments_paystack ON {{BUSINESS}}.invoice_payments (paystack_reference)
+  WHERE paystack_reference IS NOT NULL;
+
+CREATE TABLE {{BUSINESS}}.credit_notes (
+  credit_note_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  credit_note_number    TEXT        NOT NULL UNIQUE,
+  invoice_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.invoices (invoice_id),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  reason                TEXT        NOT NULL,
+  total_amount          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','issued','applied','refunded')),
+  issued_at             TIMESTAMPTZ,
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_credit_notes_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.credit_notes
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_credit_notes_invoice ON {{BUSINESS}}.credit_notes (invoice_id);
+CREATE INDEX idx_{{BUSINESS}}_credit_notes_status  ON {{BUSINESS}}.credit_notes (status);
+
+CREATE TABLE {{BUSINESS}}.credit_note_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  credit_note_id        UUID        NOT NULL REFERENCES {{BUSINESS}}.credit_notes (credit_note_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  unit_price            NUMERIC(14,2) NOT NULL,
+  line_total            NUMERIC(14,2) NOT NULL
+);
+CREATE INDEX idx_{{BUSINESS}}_credit_note_lines ON {{BUSINESS}}.credit_note_lines (credit_note_id);
+
+
+-- ┌── DIFFUSERS ────────────────────────────────────────────┐

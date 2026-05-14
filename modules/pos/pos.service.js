@@ -5,7 +5,21 @@ const stockService = require("../stock/stock.service");
 const notifService = require("../../shared/notifications/notifications.service");
 const auditService = require("../../shared/audit/audit.service");
 const { emitToBusiness } = require("../../config/sockets");
+const sessionSvc = require("./session.service");
+const receiptSvc = require("./receipt.service");
 const repo = require("./pos.repository");
+
+// ─────────────────────────────────────────────────────────────
+// POS service — coordination layer for the point of sale.
+//
+// Heavy lifting in two sub-services:
+//   - session.service.js → reconciliation, X/Z reports, variance
+//   - receipt.service.js → PDF rendering, WhatsApp/email delivery
+//
+// This file handles the transaction flow itself (taking payment,
+// recording stock movement, splitting payment methods) and session
+// open/close orchestration.
+// ─────────────────────────────────────────────────────────────
 
 async function getTerminals(business) {
   return withBusinessContext(business, async (client) => {
@@ -51,7 +65,13 @@ async function closeSession(
   user,
 ) {
   return withBusinessContext(business, async (client) => {
+    // Pull totals BEFORE closing — they're calculated from
+    // pos_payment_splits which is read-only at this point.
     const totals = await repo.getSessionTotals(client, sessionId);
+    const sessionBefore = await repo.findSessionById(client, sessionId);
+    if (!sessionBefore) {
+      throw Object.assign(new Error("Session not found"), { status: 404 });
+    }
 
     const session = await repo.closeSession(client, {
       sessionId,
@@ -79,9 +99,58 @@ async function closeSession(
       transfer_total: totals.transfer_total,
     });
 
-    emitToBusiness(business, "pos:session_closed", { sessionId });
-    return session;
+    // Reconciliation analysis (variance, manager flagging) lives in the
+    // session sub-service. Cash variance is calculated against opening
+    // float + cash sales, not just cash sales — common reconciliation
+    // bug that misses the float.
+    const reconciliation = await sessionSvc.reconcileSession(client, {
+      business,
+      sessionId,
+      openingFloat: sessionBefore.opening_float,
+      actualCash: actual_cash,
+      user,
+      reconciliationNotes: reconciliation_notes,
+    });
+
+    emitToBusiness(business, "pos:session_closed", {
+      sessionId,
+      variance: reconciliation.cash_reconciliation.variance,
+    });
+    return { ...session, reconciliation };
   });
+}
+
+// X report (mid-shift snapshot) and Z report (closed-session totals).
+async function getXReport(business, sessionId) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.getXReport(client, sessionId),
+  );
+}
+
+async function getZReport(business, sessionId) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.getZReport(client, sessionId),
+  );
+}
+
+async function listSessionsWithVariance(business, query) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.listSessionsWithVariance(client, {
+      terminalId: query.terminal_id,
+      days: parseInt(query.days) || 30,
+    }),
+  );
+}
+
+async function markReconciled(business, sessionId, body, user) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.markReconciled(client, {
+      business,
+      sessionId,
+      manager: user,
+      sign_off_notes: body?.sign_off_notes,
+    }),
+  );
 }
 
 async function createTransaction(business, data, user) {
@@ -176,7 +245,7 @@ async function createTransaction(business, data, user) {
         await stockService.recordMovement(client, {
           business,
           productId: l.product_id,
-          movementType: "pos_sale",
+          movementType: "sold",
           quantity: l.quantity,
           direction: -1,
           referenceType: "pos_transaction",
@@ -211,7 +280,7 @@ async function createTransaction(business, data, user) {
 
     await auditService.log(client, {
       userId: user.user_id,
-      userName: "staff",
+      userName: user.display_name || "staff",
       business,
       module: "pos",
       action: "create",
@@ -253,7 +322,7 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
       await stockService.recordMovement(client, {
         business,
         productId: l.product_id,
-        movementType: "returned_from_customer",
+        movementType: "return_from_customer",
         quantity: l.quantity,
         direction: 1,
         referenceType: "pos_transaction",
@@ -265,7 +334,7 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
 
     await auditService.log(client, {
       userId: user.user_id,
-      userName: "staff",
+      userName: user.display_name || "staff",
       business,
       module: "pos",
       action: "delete",
@@ -277,16 +346,14 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
   });
 }
 
-async function sendReceipt(business, transactionId, { channel = "whatsapp" }) {
-  const tx = await getTransaction(business, transactionId);
-  if (channel === "whatsapp" && tx.primary_phone) {
-    const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
-    await whatsapp.sendMessage({
-      to: tx.primary_phone,
-      text: `Receipt ${tx.transaction_number} — Total: ₦${Number(tx.total_amount).toLocaleString()}. Change: ₦${Number(tx.change_given).toLocaleString()}. Thank you for shopping with us!`,
-    });
-  }
-  return { message: "Receipt sent" };
+// Delegates to receipt sub-service — PDF + WhatsApp + email + audit.
+async function sendReceipt(business, transactionId, options, user) {
+  return receiptSvc.sendReceipt(business, transactionId, options || {}, user);
+}
+
+// Convenience — returns a Buffer that the caller can stream as a download.
+async function downloadReceiptPDF(business, transactionId) {
+  return receiptSvc.generatePDF(business, transactionId);
 }
 
 module.exports = {
@@ -294,8 +361,13 @@ module.exports = {
   openSession,
   getSession,
   closeSession,
+  getXReport,
+  getZReport,
+  listSessionsWithVariance,
+  markReconciled,
   createTransaction,
   getTransaction,
   voidTransaction,
   sendReceipt,
+  downloadReceiptPDF,
 };

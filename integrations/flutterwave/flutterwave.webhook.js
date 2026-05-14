@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const config = require("../../config/config");
 const logger = require("../../config/logger");
 const { pool } = require("../../config/db");
+const { getActiveBusinesses } = require("../../config/businesses");
 
 router.use(express.json());
 
@@ -32,7 +33,7 @@ router.post("/", async (req, res) => {
   try {
     if (event === "charge.completed" && data.status === "successful") {
       // Find invoice payment by flutterwave reference
-      for (const business of ["jewelry", "diffusers"]) {
+      for (const business of getActiveBusinesses()) {
         await pool
           .query(
             `

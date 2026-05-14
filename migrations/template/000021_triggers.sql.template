@@ -1,0 +1,298 @@
+-- ============================================================
+-- TEMPLATE — 000021_triggers.sql (per-business triggers)
+--
+-- Applied by scripts/bootstrapBusiness.js. Creates the functions
+-- and triggers that enforce per-business business rules:
+--   - journal entry balance check
+--   - stock non-negative check
+--   - invoice payment auto-update
+--   - payslip totals recalculation
+--   - and others
+--
+-- Triggers 1 and 2 in the original 000021_triggers.sql (audit_log
+-- protection, documents immutability) operate on shared tables and
+-- are NOT in this template; they run once for the whole installation.
+-- ============================================================
+
+-- ── TRIGGER 3: Journal entry balance check ───────────────
+-- Every journal entry must balance: SUM(debit) = SUM(credit).
+-- Fires AFTER the last line is inserted for an entry.
+-- The application service also enforces this — the trigger
+-- is the database-level safety net.
+
+CREATE OR REPLACE FUNCTION shared.fn_check_journal_balance()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_total_debit  NUMERIC(15,2);
+  v_total_credit NUMERIC(15,2);
+BEGIN
+  SELECT
+    COALESCE(SUM(debit),  0),
+    COALESCE(SUM(credit), 0)
+  INTO v_total_debit, v_total_credit
+  FROM {{BUSINESS}}.journal_lines
+  WHERE entry_id = NEW.entry_id;
+
+  IF v_total_debit != v_total_credit THEN
+    RAISE EXCEPTION
+      'Journal entry % does not balance: debit=% credit=%. '
+      'Each journal entry must have equal debits and credits.',
+      NEW.entry_id, v_total_debit, v_total_credit;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+-- Apply to {{BUSINESS}}
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_check_journal_balance()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_debit  NUMERIC(15,2);
+  v_credit NUMERIC(15,2);
+BEGIN
+  SELECT COALESCE(SUM(debit),0), COALESCE(SUM(credit),0)
+  INTO v_debit, v_credit
+  FROM {{BUSINESS}}.journal_lines
+  WHERE entry_id = NEW.entry_id;
+
+  IF v_debit != v_credit THEN
+    RAISE EXCEPTION
+      'Journal entry % is unbalanced: DR=% CR=%. Fix before commit.',
+      NEW.entry_id, v_debit, v_credit;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_journal_balance
+  AFTER INSERT OR UPDATE ON {{BUSINESS}}.journal_lines
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_check_journal_balance();
+
+-- Apply to {{BUSINESS}}
+-- ── TRIGGER 4: Stock non-negative check ──────────────────
+-- Prevents stock from going below zero for non-adjustment
+-- movement types. Adjustments bypass this (they are explicit
+-- corrections with a reason and approval).
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_stock_no_negative()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_current_stock INTEGER;
+BEGIN
+  -- Only check outbound movements that are not adjustments
+  IF NEW.direction = -1 AND NEW.movement_type != 'adjustment' THEN
+    SELECT COALESCE(SUM(quantity * direction), 0)
+    INTO v_current_stock
+    FROM {{BUSINESS}}.stock_movements
+    WHERE product_id = NEW.product_id;
+
+    -- After this movement would stock go negative?
+    IF (v_current_stock + (NEW.quantity * NEW.direction)) < 0 THEN
+      RAISE EXCEPTION
+        'Insufficient stock for product %. '
+        'Current: %, Requested: %. '
+        'Use movement_type=adjustment with approval to correct stock counts.',
+        NEW.product_id, v_current_stock, NEW.quantity;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_stock_no_negative
+  BEFORE INSERT ON {{BUSINESS}}.stock_movements
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_stock_no_negative();
+
+-- ── TRIGGER 5: Auto-update invoice amount_paid and status ─
+-- When a payment is inserted against an invoice, recalculate
+-- the invoice's amount_paid and update status accordingly.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_update_invoice_on_payment()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_total_paid    NUMERIC(14,2);
+  v_total_amount  NUMERIC(14,2);
+  v_new_status    TEXT;
+BEGIN
+  -- Sum all confirmed payments for this invoice
+  SELECT COALESCE(SUM(amount), 0)
+  INTO v_total_paid
+  FROM {{BUSINESS}}.invoice_payments
+  WHERE invoice_id = NEW.invoice_id;
+
+  SELECT total_amount
+  INTO v_total_amount
+  FROM {{BUSINESS}}.invoices
+  WHERE invoice_id = NEW.invoice_id;
+
+  -- Determine new status
+  IF v_total_paid <= 0 THEN
+    v_new_status := 'sent';
+  ELSIF v_total_paid >= v_total_amount THEN
+    v_new_status := 'paid';
+  ELSE
+    v_new_status := 'partially_paid';
+  END IF;
+
+  UPDATE {{BUSINESS}}.invoices
+  SET
+    amount_paid = v_total_paid,
+    status      = v_new_status,
+    paid_at     = CASE WHEN v_new_status = 'paid' THEN now() ELSE NULL END,
+    updated_at  = now()
+  WHERE invoice_id = NEW.invoice_id;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_invoice_payment_update
+  AFTER INSERT OR UPDATE ON {{BUSINESS}}.invoice_payments
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_update_invoice_on_payment();
+
+-- ── TRIGGER 6: Payslip totals recalculation ──────────────
+-- Recomputes gross_salary, total_deductions, and net_salary
+-- from component columns before any insert or update.
+-- Prevents manual override of derived values.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_recalc_payslip()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.gross_salary := NEW.basic_salary
+                    + NEW.housing_allowance
+                    + NEW.transport_allowance
+                    + NEW.commission_amount
+                    + NEW.other_allowances;
+
+  NEW.total_deductions := NEW.paye_deduction
+                        + NEW.pension_employee
+                        + NEW.nhf_deduction
+                        + NEW.advance_recovery
+                        + NEW.other_deductions;
+
+  NEW.net_salary := NEW.gross_salary - NEW.total_deductions;
+
+  IF NEW.net_salary < 0 THEN
+    RAISE EXCEPTION
+      'Payslip for profile % results in negative net salary (%). '
+      'Check deductions.',
+      NEW.profile_id, NEW.net_salary;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_payslip_recalc
+  BEFORE INSERT OR UPDATE ON {{BUSINESS}}.payslips
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_recalc_payslip();
+
+-- ── TRIGGER 7: Consignment quantity validation ────────────
+-- Ensures quantity_sold + quantity_returned never exceeds
+-- quantity_sent on a consignment record.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_validate_consignment_qty()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF (NEW.quantity_sold + NEW.quantity_returned) > NEW.quantity_sent THEN
+    RAISE EXCEPTION
+      'Consignment % quantity violation: sold(%) + returned(%) > sent(%).',
+      NEW.consignment_id, NEW.quantity_sold, NEW.quantity_returned, NEW.quantity_sent;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_consignment_qty_check
+  BEFORE INSERT OR UPDATE ON {{BUSINESS}}.consignment_stock
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_validate_consignment_qty();
+
+-- ── TRIGGER 8: Auto-generate delivery tracking entry ─────
+-- When a delivery status changes, automatically append a
+-- tracking row so the history is always complete.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_auto_delivery_tracking()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.status != OLD.status THEN
+    INSERT INTO {{BUSINESS}}.delivery_tracking
+      (delivery_id, status, source, message, occurred_at)
+    VALUES
+      (NEW.delivery_id, NEW.status, 'system',
+       'Status changed from ' || OLD.status || ' to ' || NEW.status,
+       now());
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_delivery_auto_tracking
+  AFTER UPDATE ON {{BUSINESS}}.deliveries
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_auto_delivery_tracking();
+
+-- ── TRIGGER 9: PO line received qty guard ─────────────────
+-- Prevents marking more quantity received than was ordered
+-- on a purchase order line.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_po_line_received_check()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.quantity_received > NEW.quantity_ordered THEN
+    RAISE EXCEPTION
+      'PO line %: quantity_received (%) cannot exceed quantity_ordered (%).',
+      NEW.line_id, NEW.quantity_received, NEW.quantity_ordered;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_po_line_received
+  BEFORE INSERT OR UPDATE ON {{BUSINESS}}.po_lines
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_po_line_received_check();
+
+-- ── TRIGGER 10: Overdue invoice auto-flag ─────────────────
+-- A daily cron job calls this function to mark overdue invoices.
+-- Not a row trigger — called explicitly by the scheduler.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_mark_overdue_invoices()
+RETURNS INTEGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_count INTEGER;
+BEGIN
+  UPDATE {{BUSINESS}}.invoices
+  SET status = 'overdue', updated_at = now()
+  WHERE due_date < CURRENT_DATE
+    AND status IN ('sent','partially_paid')
+    AND is_deleted = false;
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+
+-- ── TRIGGER 11: Expire stock reservations ─────────────────
+-- Called by cron. Releases reservations past their expiry.
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_expire_reservations()
+RETURNS INTEGER
+LANGUAGE plpgsql AS $$
+DECLARE v_count INTEGER;
+BEGIN
+  UPDATE {{BUSINESS}}.stock_reservations
+  SET status = 'released', updated_at = now()
+  WHERE expires_at < now()
+    AND status = 'active';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;

@@ -47,24 +47,24 @@ router.use(
 
 // ── Protected — shared modules (no business schema needed) ─
 router.use("/contacts", protect, require("../shared/contacts/contacts.routes"));
-// router.use(
-//   "/documents",
-//   protect,
-//   require("../shared/documents/documents.routes"),
-// );
+router.use(
+  "/documents",
+  protect,
+  require("../shared/documents/documents.routes"),
+);
 router.use(
   "/notifications",
   protect,
   require("../shared/notifications/notifications.routes"),
 );
-//router.use("/staff", protect, require("../shared/staff/staff.routes"));
-// router.use(
-//   "/messaging",
-//   protect,
-//   require("../shared/messaging/messaging.routes"),
-// );
-// router.use("/calendar", protect, require("../shared/calendar/calendar.routes"));
-// router.use("/tasks", protect, require("../shared/tasks/tasks.routes"));
+router.use("/staff", protect, require("../shared/staff/staff.routes"));
+router.use(
+  "/messaging",
+  protect,
+  require("../shared/messaging/messaging.routes"),
+);
+router.use("/calendar", protect, require("../shared/calendar/calendar.routes"));
+router.use("/tasks", protect, require("../shared/tasks/tasks.routes"));
 
 // ── Protected — business modules (require business context) ─
 router.use("/crm", protect, require("../modules/crm/crm.routes"));
@@ -97,11 +97,11 @@ router.use(
   protect,
   require("../modules/logistics/logistics.routes"),
 );
-// router.use(
-//   "/retail-partners",
-//   protect,
-//   require("../modules/retail-partners/retail-partners.routes"),
-// );
+router.use(
+  "/retail-partners",
+  protect,
+  require("../modules/retail-partners/retail-partners.routes"),
+);
 router.use(
   "/campaigns",
   protect,
@@ -112,11 +112,11 @@ router.use(
   protect,
   require("../modules/dashboards/dashboards.routes"),
 );
-//router.use("/reports", protect, require("../modules/reports/reports.routes"));
-// router.use(
-//   "/settings",
-//   protect,
-//   require("../modules/settings/settings.routes"),
-// );
+router.use("/reports", protect, require("../modules/reports/reports.routes"));
+router.use(
+  "/settings",
+  protect,
+  require("../modules/settings/settings.routes"),
+);
 
 module.exports = router;

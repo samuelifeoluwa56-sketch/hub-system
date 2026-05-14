@@ -6,6 +6,7 @@ const router = express.Router();
 const config = require("../../config/config");
 const logger = require("../../config/logger");
 const { pool } = require("../../config/db");
+const { getActiveBusinesses } = require("../../config/businesses");
 
 // Raw body needed for HMAC verification — must be before express.json()
 router.use(express.raw({ type: "application/json" }));
@@ -78,7 +79,7 @@ async function handleChargeSuccess(data) {
   const reference = data.reference;
 
   // Try to match against jewelry invoices
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     const result = await pool.query(
       `SET LOCAL search_path TO ${business}, shared, public;
        SELECT payment_id FROM invoice_payments

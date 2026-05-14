@@ -43,7 +43,7 @@ async function init(httpServer) {
     );
 
     socket.on("switch_business", (business) => {
-      if (config.app.businesses.includes(business)) {
+      if (require("./businesses").isValidBusiness(business)) {
         socket.leave(`business:${socket.business}`);
         socket.business = business;
         socket.join(`business:${business}`);

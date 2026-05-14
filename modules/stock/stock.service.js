@@ -1,10 +1,21 @@
 "use strict";
 
 const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
-const notifService = require("../../shared/notifications/notifications.service");
-const auditService = require("../../shared/audit/audit.service");
-const { emitToBusiness } = require("../../config/sockets");
+const movements = require("./movements.service");
 const repo = require("./stock.repository");
+
+// ─────────────────────────────────────────────────────────────
+// Stock service — coordination layer for the stock module.
+//
+// Heavy lifting lives in two sub-services:
+//   - movements.service.js → all writes to stock_movements and reservations
+//   - valuation.service.js → cost basis, COGS, total stock value
+//
+// This file orchestrates: current-stock queries, transfers, adjustments,
+// low-stock alerts, location list. It re-exports recordMovement and
+// checkLowStock from movements.service so existing callers in POS,
+// sales, purchasing, and logistics continue to work unchanged.
+// ─────────────────────────────────────────────────────────────
 
 async function getCurrentStock(
   business,
@@ -35,68 +46,6 @@ async function getMovements(
   });
 }
 
-async function recordMovement(
-  client,
-  {
-    business,
-    productId,
-    movementType,
-    quantity,
-    direction,
-    fromLocationId,
-    toLocationId,
-    referenceType,
-    referenceId,
-    unitCost,
-    notes,
-    performedBy,
-  },
-) {
-  const movement = await repo.insertMovement(client, {
-    productId,
-    movementType,
-    quantity,
-    direction,
-    fromLocationId,
-    toLocationId,
-    referenceType,
-    referenceId,
-    unitCost,
-    notes,
-    performedBy,
-  });
-
-  if (direction === -1) {
-    await checkLowStock(client, business, productId);
-  }
-
-  return movement;
-}
-
-async function checkLowStock(client, business, productId) {
-  const stock = await repo.getLowStockStatus(client, productId);
-  if (stock && stock.current_qty <= stock.reorder_level) {
-    const managers = await repo.getStockManagers(client, business);
-    for (const manager of managers) {
-      await notifService.create(client, {
-        userId: manager.user_id,
-        business,
-        type: "stock_alert",
-        title: `Low stock: ${stock.name}`,
-        body: `Current quantity (${stock.current_qty}) is at or below reorder level (${stock.reorder_level}).`,
-        referenceType: "product",
-        referenceId: productId,
-        actionUrl: `/stock?productId=${productId}`,
-      });
-    }
-    emitToBusiness(business, "stock:low_alert", {
-      productId,
-      productName: stock.name,
-      currentQty: stock.current_qty,
-    });
-  }
-}
-
 async function createAdjustment(business, data, user) {
   return withBusinessContext(business, async (client) => {
     const currentQty = await repo.getCurrentQty(client, data.product_id);
@@ -115,7 +64,7 @@ async function createAdjustment(business, data, user) {
       userId: user.user_id,
     });
 
-    await recordMovement(client, {
+    await movements.recordMovement(client, {
       business,
       productId: data.product_id,
       movementType: "adjustment",
@@ -148,7 +97,7 @@ async function createTransfer(business, data, user) {
     });
 
     for (const item of data.items) {
-      await recordMovement(client, {
+      await movements.recordMovement(client, {
         business,
         productId: item.product_id,
         movementType: "transferred_out",
@@ -159,7 +108,7 @@ async function createTransfer(business, data, user) {
         referenceId: transfer.transfer_id,
         performedBy: user.user_id,
       });
-      await recordMovement(client, {
+      await movements.recordMovement(client, {
         business,
         productId: item.product_id,
         movementType: "transferred_in",
@@ -193,7 +142,15 @@ async function getLocations(business) {
 module.exports = {
   getCurrentStock,
   getMovements,
-  recordMovement,
+  // Re-exported from movements.service so external callers
+  // (POS, sales, purchasing, logistics) keep their imports unchanged.
+  recordMovement: movements.recordMovement,
+  checkLowStock: movements.checkLowStock,
+  // New capabilities surfaced via the stock service for convenience.
+  getAvailableQty: movements.getAvailableQty,
+  createReservation: movements.createReservation,
+  releaseReservation: movements.releaseReservation,
+  // Local operations
   createAdjustment,
   createTransfer,
   getLowStockAlerts,
