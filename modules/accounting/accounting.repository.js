@@ -55,19 +55,20 @@ async function findJournalById(client, entryId) {
 
 async function insertJournalEntry(
   client,
-  { entryDate, description, referenceType, periodId, postedBy },
+  { entryDate, description, referenceType, referenceId, periodId, postedBy },
 ) {
   const {
     rows: [entry],
   } = await client.query(
     `INSERT INTO journal_entries
-       (entry_number, entry_date, description, reference_type, fiscal_period_id, posted_by)
-     VALUES ('JE-M-'||to_char(now(),'YYYYMMDD-HH24MISS'), $1,$2,$3,$4,$5)
+       (entry_number, entry_date, description, reference_type, reference_id, fiscal_period_id, posted_by)
+     VALUES ('JE-M-'||to_char(now(),'YYYYMMDD-HH24MISS'), $1,$2,$3,$4,$5,$6)
      RETURNING *`,
     [
       entryDate,
       description,
       referenceType || "manual",
+      referenceId || null,
       periodId || null,
       postedBy,
     ],
@@ -131,6 +132,23 @@ async function reconcileStatement(client, { statementId, paymentId }) {
      WHERE statement_id=$2`,
     [paymentId, statementId],
   );
+}
+
+// Added: needed by reconciliation.service.getReconciliationSummary
+async function getReconciliationSummary(client, bankAccountId) {
+  const {
+    rows: [summary],
+  } = await client.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE is_reconciled=false)            AS unreconciled_count,
+       COALESCE(SUM(ABS(amount)) FILTER (WHERE is_reconciled=false), 0) AS unreconciled_value,
+       COUNT(*) FILTER (WHERE is_reconciled=true)             AS reconciled_count,
+       MAX(transaction_date)                                  AS last_statement_date
+     FROM bank_statements
+     WHERE bank_account_id=$1`,
+    [bankAccountId],
+  );
+  return summary;
 }
 
 async function findFiscalPeriods(client) {
@@ -218,6 +236,7 @@ module.exports = {
   findActivePeriod,
   findBankStatements,
   reconcileStatement,
+  getReconciliationSummary,
   findFiscalPeriods,
   closeFiscalPeriod,
   getPLData,

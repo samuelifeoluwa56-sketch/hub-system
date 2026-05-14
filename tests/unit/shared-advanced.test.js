@@ -118,7 +118,10 @@ describe("Messaging Service", () => {
     });
 
     it("should track read status", () => {
-      const message = generateMessage(TEST_BUSINESS, { is_read: true });
+      const message = generateMessage(TEST_BUSINESS, {
+        is_read: true,
+        read_at: new Date().toISOString(),
+      });
       expect(message.is_read).toBe(true);
       expect(message.read_at).toBeTruthy();
     });

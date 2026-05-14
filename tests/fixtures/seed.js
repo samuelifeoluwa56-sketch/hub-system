@@ -774,7 +774,7 @@ function generateEcommerceProduct(business = TEST_BUSINESS, overrides = {}) {
     business_id: business.business_id,
     external_id: `EXT-${Math.random().toString(36).substring(7)}`,
     product_name: "Test Product",
-    sku: `SKU-${Date.now()}`,
+    sku: `SKU-${Date.now()}-${Math.random().toString(36).substring(7)}`,
     price: 25000,
     quantity: 100,
     description: "Test product description",
@@ -848,6 +848,114 @@ function generateWebhookEvent(business = TEST_BUSINESS, overrides = {}) {
   };
 }
 
+/**
+ * Generate logistics tracking data
+ */
+function generateLogisticsTracking(business = TEST_BUSINESS, overrides = {}) {
+  return {
+    tracking_id: crypto.randomUUID(),
+    business_id: business.business_id,
+    shipment_id: crypto.randomUUID(),
+    carrier: "test_logistics",
+    tracking_number: `TRK-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    status: "in_transit",
+    current_location: "Transit Hub",
+    estimated_delivery: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0],
+    last_update: new Date().toISOString(),
+    events: [
+      {
+        timestamp: new Date().toISOString(),
+        status: "picked_up",
+        location: "Origin",
+      },
+    ],
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate SMS message data
+ */
+function generateSmsMessage(business = TEST_BUSINESS, overrides = {}) {
+  return {
+    sms_id: crypto.randomUUID(),
+    business_id: business.business_id,
+    recipient_phone: "+234803456789",
+    sender_id: "HubSystem",
+    message_body: "Your OTP is 123456",
+    status: "sent",
+    delivery_status: "delivered",
+    provider: "sms_provider",
+    message_type: "otp",
+    reference: `SMS-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+    cost: 50,
+    created_at: new Date().toISOString(),
+    sent_at: new Date().toISOString(),
+    delivered_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate password reset token
+ */
+function generatePasswordReset(user = TEST_USER, overrides = {}) {
+  return {
+    reset_id: crypto.randomUUID(),
+    user_id: user.user_id,
+    email: user.email,
+    token: crypto.randomBytes(32).toString("hex"),
+    token_hash: crypto.createHash("sha256").digest("hex"),
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    used: false,
+    used_at: null,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate MFA challenge data
+ */
+function generateMfaChallenge(user = TEST_USER, overrides = {}) {
+  return {
+    challenge_id: crypto.randomUUID(),
+    user_id: user.user_id,
+    challenge_type: "totp",
+    secret: crypto.randomBytes(16).toString("base64"),
+    backup_codes: Array.from({ length: 10 }, () =>
+      Math.random().toString(36).substring(7).toUpperCase(),
+    ),
+    verified: false,
+    verified_at: null,
+    enabled: false,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate session data
+ */
+function generateSession(user = TEST_USER, overrides = {}) {
+  return {
+    session_id: crypto.randomUUID(),
+    user_id: user.user_id,
+    ip_address: "192.168.1.1",
+    user_agent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    device_fingerprint: crypto.randomBytes(16).toString("hex"),
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    created_at: new Date().toISOString(),
+    last_activity: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 module.exports = {
   // Constants
   TEST_USER,
@@ -891,4 +999,9 @@ module.exports = {
   generateSocialPost,
   generateRetailPartner,
   generateWebhookEvent,
+  generateLogisticsTracking,
+  generateSmsMessage,
+  generatePasswordReset,
+  generateMfaChallenge,
+  generateSession,
 };

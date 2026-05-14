@@ -2,7 +2,15 @@
 
 const repo = require("./accounting.repository");
 
-// Post any journal entry from another module
+/**
+ * Post any journal entry from within or outside this module.
+ * The canonical write path — every other module (payroll, sales, purchasing)
+ * calls this instead of touching journal_entries / journal_lines directly.
+ *
+ * Must be called inside an active withBusinessContext block so that
+ * the journal and its parent record (payroll run, invoice, PO receipt)
+ * commit or roll back together.
+ */
 async function postEntry(
   client,
   { entryDate, description, referenceType, referenceId, postedBy, lines },
@@ -15,25 +23,17 @@ async function postEntry(
     );
   }
 
-  const period = await repo.findActivePeriod(
-    client,
-    entryDate || new Date().toISOString().split("T")[0],
-  );
+  const today = new Date().toISOString().split("T")[0];
+  const period = await repo.findActivePeriod(client, entryDate || today);
+
   const entry = await repo.insertJournalEntry(client, {
-    entryDate: entryDate || new Date().toISOString().split("T")[0],
+    entryDate: entryDate || today,
     description,
     referenceType,
-    periodId: period?.period_id,
+    referenceId: referenceId || null,
+    periodId: period?.period_id || null,
     postedBy,
   });
-
-  // Set reference_id directly
-  if (referenceId) {
-    await client.query(
-      `UPDATE journal_entries SET reference_id=$1 WHERE entry_id=$2`,
-      [referenceId, entry.entry_id],
-    );
-  }
 
   for (const l of lines) {
     await repo.insertJournalLine(client, {
@@ -49,7 +49,10 @@ async function postEntry(
   return entry;
 }
 
-// Reverse an existing journal entry
+/**
+ * Reverse an existing journal entry — swaps DR/CR on every line
+ * and marks the original as reversed.
+ */
 async function reverseEntry(client, { entryId, postedBy }) {
   const original = await repo.findJournalById(client, entryId);
   if (!original)
@@ -81,12 +84,16 @@ async function reverseEntry(client, { entryId, postedBy }) {
   return reversal;
 }
 
-// Look up account_id by code — used by other modules when posting journals
+/**
+ * Resolve an account_id from a chart-of-accounts code.
+ * Used by external modules that post journals by code rather than UUID.
+ */
 async function getAccountId(client, accountCode) {
   const {
     rows: [acc],
   } = await client.query(
-    `SELECT account_id FROM chart_of_accounts WHERE account_code=$1 AND is_active=true LIMIT 1`,
+    `SELECT account_id FROM chart_of_accounts
+     WHERE account_code=$1 AND is_active=true LIMIT 1`,
     [accountCode],
   );
   return acc?.account_id || null;

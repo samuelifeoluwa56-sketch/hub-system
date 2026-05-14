@@ -36,3 +36,7 @@ coverage/
 audit.md
 schema-two.html
 build_pixie_tech_arch.js
+test-fail.txt
+test-fail2.txt
+test-results.txt
+test-results2.txt

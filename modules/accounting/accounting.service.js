@@ -3,6 +3,11 @@
 const { withBusinessContext } = require("../../config/db");
 const auditService = require("../../shared/audit/audit.service");
 const repo = require("./accounting.repository");
+const journalService = require("./journal.service");
+const reconciliationService = require("./reconciliation.service");
+const reportsService = require("./reports.service");
+
+// ─── Accounts ────────────────────────────────────────────────────────────────
 
 async function listAccounts(business, { type, active = "true" } = {}) {
   return withBusinessContext(business, async (client) => {
@@ -10,6 +15,8 @@ async function listAccounts(business, { type, active = "true" } = {}) {
     return { data: rows };
   });
 }
+
+// ─── Journal entries ─────────────────────────────────────────────────────────
 
 async function listJournals(
   business,
@@ -41,7 +48,7 @@ async function getJournal(business, entryId) {
 
 async function createManualJournal(business, data, user) {
   return withBusinessContext(business, async (client) => {
-    // Validate balance
+    // Balance validation stays here — it's a service-layer concern
     const totalDebit = data.lines.reduce(
       (s, l) => s + parseFloat(l.debit || 0),
       0,
@@ -59,25 +66,14 @@ async function createManualJournal(business, data, user) {
       );
     }
 
-    const period = await repo.findActivePeriod(client, data.entry_date);
-
-    const entry = await repo.insertJournalEntry(client, {
+    // Delegate the write to journal.service — single source of truth for all journal writes
+    const entry = await journalService.postEntry(client, {
       entryDate: data.entry_date,
       description: data.description,
       referenceType: "manual",
-      periodId: period?.period_id || null,
       postedBy: user.user_id,
+      lines: data.lines,
     });
-
-    for (const l of data.lines) {
-      await repo.insertJournalLine(client, {
-        entryId: entry.entry_id,
-        accountId: l.account_id,
-        debit: l.debit || 0,
-        credit: l.credit || 0,
-        description: l.description || null,
-      });
-    }
 
     await auditService.log(client, {
       userId: user.user_id,
@@ -94,71 +90,49 @@ async function createManualJournal(business, data, user) {
   });
 }
 
-async function getProfitAndLoss(business, { startDate, endDate } = {}) {
-  const now = new Date();
-  const sd = startDate || `${now.getFullYear()}-01-01`;
-  const ed = endDate || `${now.getFullYear()}-12-31`;
-
+async function reverseJournal(business, entryId, user) {
   return withBusinessContext(business, async (client) => {
-    const rows = await repo.getPLData(client, { startDate: sd, endDate: ed });
-
-    const income = rows.filter((r) => r.account_type === "income");
-    const expenses = rows.filter((r) => r.account_type === "expense");
-    const totalIncome = income.reduce((s, r) => s + parseFloat(r.balance), 0);
-    const totalExpenses = expenses.reduce(
-      (s, r) => s + parseFloat(r.balance),
-      0,
-    );
-
-    return {
-      period: { startDate: sd, endDate: ed },
-      income,
-      expenses,
-      total_income: totalIncome,
-      total_expenses: totalExpenses,
-      net_profit: totalIncome - totalExpenses,
-    };
-  });
-}
-
-async function getBalanceSheet(business, { asOfDate } = {}) {
-  const date = asOfDate || new Date().toISOString().split("T")[0];
-
-  return withBusinessContext(business, async (client) => {
-    const rows = await repo.getBalanceSheetData(client, { asOfDate: date });
-
-    const assets = rows.filter((r) => r.account_type === "asset");
-    const liabilities = rows.filter((r) => r.account_type === "liability");
-    const equity = rows.filter((r) => r.account_type === "equity");
-
-    return {
-      as_of_date: date,
-      assets,
-      liabilities,
-      equity,
-      total_assets: assets.reduce((s, r) => s + parseFloat(r.balance), 0),
-      total_liabilities: liabilities.reduce(
-        (s, r) => s + parseFloat(r.balance),
-        0,
-      ),
-      total_equity: equity.reduce((s, r) => s + parseFloat(r.balance), 0),
-    };
-  });
-}
-
-async function getTrialBalance(business, { startDate, endDate } = {}) {
-  const now = new Date();
-  const sd = startDate || `${now.getFullYear()}-01-01`;
-  const ed = endDate || `${now.getFullYear()}-12-31`;
-
-  return withBusinessContext(business, async (client) => {
-    const rows = await repo.getTrialBalanceData(client, {
-      startDate: sd,
-      endDate: ed,
+    const reversal = await journalService.reverseEntry(client, {
+      entryId,
+      postedBy: user.user_id,
     });
-    return { period: { startDate: sd, endDate: ed }, data: rows };
+
+    await auditService.log(client, {
+      userId: user.user_id,
+      userName: "staff",
+      business,
+      module: "accounting",
+      action: "reverse",
+      table: "journal_entries",
+      recordId: entryId,
+      after: reversal,
+    });
+
+    return reversal;
   });
 }
+
+// ─── Financial reports ────────────────────────────────────────────────────────
+
+async function getProfitAndLoss(business, query = {}) {
+  return withBusinessContext(business, async (client) => {
+    return reportsService.profitAndLoss(client, query);
+  });
+}
+
+async function getBalanceSheet(business, query = {}) {
+  return withBusinessContext(business, async (client) => {
+    return reportsService.balanceSheet(client, query);
+  });
+}
+
+async function getTrialBalance(business, query = {}) {
+  return withBusinessContext(business, async (client) => {
+    return reportsService.trialBalance(client, query);
+  });
+}
+
+// ─── Bank reconciliation ──────────────────────────────────────────────────────
 
 async function listBankStatements(
   business,
@@ -175,13 +149,30 @@ async function listBankStatements(
 
 async function reconcile(business, { statement_id, payment_id }, user) {
   return withBusinessContext(business, async (client) => {
-    await repo.reconcileStatement(client, {
+    return reconciliationService.reconcileItem(client, {
       statementId: statement_id,
       paymentId: payment_id,
     });
-    return { message: "Reconciled successfully" };
   });
 }
+
+async function getReconciliationSummary(business, bankAccountId) {
+  return withBusinessContext(business, async (client) => {
+    return reconciliationService.getReconciliationSummary(
+      client,
+      bankAccountId,
+    );
+  });
+}
+
+async function listUnreconciled(business) {
+  return withBusinessContext(business, async (client) => {
+    const rows = await reconciliationService.listUnreconciled(client);
+    return { data: rows };
+  });
+}
+
+// ─── Fiscal periods ───────────────────────────────────────────────────────────
 
 async function listFiscalPeriods(business) {
   return withBusinessContext(business, async (client) => {
@@ -209,11 +200,14 @@ module.exports = {
   listJournals,
   getJournal,
   createManualJournal,
+  reverseJournal,
   getProfitAndLoss,
   getBalanceSheet,
   getTrialBalance,
   listBankStatements,
   reconcile,
+  getReconciliationSummary,
+  listUnreconciled,
   listFiscalPeriods,
   closePeriod,
 };
