@@ -52,3 +52,8 @@ tests/        — Unit and integration tests
 - All document numbers from `nextDocumentNumber(client, business, type)`
 - Financial mutations always post a matching `journal_entry`
 - Stock changes always write to `stock_movements` — never update a quantity column
+
+
+## Tests
+- Run `npm test`
+- Read `TEST_SUMMARY.md` for more information

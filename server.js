@@ -28,7 +28,7 @@ async function start() {
 
   server.listen(config.app.port, () => {
     logger.info(
-      `Hub server running on port ${config.app.port} [${config.app.env}]`,
+      `🚀 Hub server running on http://localhost:${config.app.port} [${config.app.env}]`,
     );
   });
 }

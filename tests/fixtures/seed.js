@@ -956,6 +956,88 @@ function generateSession(user = TEST_USER, overrides = {}) {
   };
 }
 
+/**
+ * Generate role data
+ */
+function generateRole(overrides = {}) {
+  return {
+    role_id: crypto.randomUUID(),
+    role_name: "manager",
+    role_description: "Manager with limited permissions",
+    is_system: false,
+    is_active: true,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate permission data
+ */
+function generatePermission(role = generateRole(), overrides = {}) {
+  const modules = [
+    "invoicing",
+    "sales",
+    "purchasing",
+    "stock",
+    "accounting",
+    "payroll",
+    "crm",
+    "reports",
+  ];
+  const actions = ["create", "read", "update", "delete"];
+  const recordScopes = ["own", "team", "all", "none"];
+
+  const module = modules[Math.floor(Math.random() * modules.length)];
+  const action = actions[Math.floor(Math.random() * actions.length)];
+  const recordScope =
+    recordScopes[Math.floor(Math.random() * recordScopes.length)];
+
+  return {
+    permission_id: crypto.randomUUID(),
+    role_id: role.role_id,
+    module,
+    action,
+    record_scope: recordScope,
+    hidden_fields: ["sensitive_data", "cost"],
+    granted_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Generate role permissions set
+ */
+function generateRolePermissions(role = generateRole(), overrides = {}) {
+  const modules = [
+    "invoicing",
+    "sales",
+    "purchasing",
+    "stock",
+    "accounting",
+  ];
+  const permissions = modules.map((module) => ({
+    permission_id: crypto.randomUUID(),
+    role_id: role.role_id,
+    module,
+    action: "read",
+    record_scope: "all",
+    hidden_fields: [],
+    granted_at: new Date().toISOString(),
+  }));
+
+  // Apply overrides
+  if (overrides.permissions) {
+    return overrides.permissions;
+  }
+
+  return {
+    role_id: role.role_id,
+    permissions,
+    ...overrides,
+  };
+}
+
 module.exports = {
   // Constants
   TEST_USER,
@@ -1004,4 +1086,7 @@ module.exports = {
   generatePasswordReset,
   generateMfaChallenge,
   generateSession,
+  generateRole,
+  generatePermission,
+  generateRolePermissions,
 };

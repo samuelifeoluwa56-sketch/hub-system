@@ -114,6 +114,14 @@ router.use(
   require("../modules/dashboards/dashboards.routes"),
 );
 router.use("/reports", protect, require("../modules/reports/reports.routes"));
+// Permissions admin — mounted BEFORE /settings so Express matches the
+// more specific path first. The router lives in shared/permissions/
+// because it manages global role definitions, not per-module config.
+router.use(
+  "/settings/permissions",
+  protect,
+  require("../shared/permissions/permissions.routes"),
+);
 router.use(
   "/settings",
   protect,
