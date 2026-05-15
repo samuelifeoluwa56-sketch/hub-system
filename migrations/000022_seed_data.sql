@@ -21,7 +21,7 @@ DECLARE
   v_owner_id UUID := '00000001-0000-0000-0000-000000000001';
   v_modules  TEXT[] := ARRAY['crm','sales','pos','invoicing','accounting','stock',
                               'purchasing','expenses','payroll','logistics',
-                              'retail_partners','messaging','campaigns','calendar',
+                              'retail_partners','messaging','campaigns','social','calendar',
                               'tasks','dashboards','documents','staff','settings'];
   v_actions  TEXT[] := ARRAY['view','create','edit','delete','approve','export'];
   m TEXT;
@@ -42,7 +42,7 @@ DECLARE
   v_manager_id UUID := '00000001-0000-0000-0000-000000000002';
   v_modules    TEXT[] := ARRAY['crm','sales','pos','invoicing','accounting','stock',
                                 'purchasing','expenses','payroll','logistics',
-                                'retail_partners','messaging','campaigns','calendar',
+                                'retail_partners','messaging','campaigns','social','calendar',
                                 'tasks','dashboards','documents','staff'];
   v_actions    TEXT[] := ARRAY['view','create','edit','delete','approve','export'];
   m TEXT; a TEXT;
@@ -81,7 +81,10 @@ BEGIN
     (v_sales_id, 'tasks',     'create', 'all',  '{}'),
     (v_sales_id, 'dashboards','view',   'all',  '{}'),
     (v_sales_id, 'expenses',  'view',   'own',  '{}'),
-    (v_sales_id, 'expenses',  'create', 'own',  '{}')
+    (v_sales_id, 'expenses',  'create', 'own',  '{}'),
+    (v_sales_id, 'social',    'view',   'all',  '{}'),
+    (v_sales_id, 'social',    'create', 'all',  '{}'),
+    (v_sales_id, 'social',    'edit',   'own',  '{}')
   ON CONFLICT (role_id, module, action) DO NOTHING;
 END $$;
 

@@ -48,11 +48,11 @@ function start() {
     "syncShopifyStock", "*/15 * * * *",
     require("./syncShopifyStock"),
   );
-  register(
-    "syncWooCommerceStock",
-    "*/15 * * * *",
-    require("./syncWooCommerceStock"),
-  );
+  // register(
+  //   "syncWooCommerceStock",
+  //   "*/15 * * * *",
+  //   require("./syncWooCommerceStock"),
+  // );
   register(
     "sendScheduledCampaigns",
     "*/5 * * * *",
@@ -87,7 +87,7 @@ function start() {
   register(
     "sendpartnerPaymentReminders",
     "0 0 1 * *",
-    require("./sendpartnerPaymentReminders"),
+    require("./sendPartnerPaymentReminders"),
   );
 
   jobs.forEach(({ name, task }) => {

@@ -122,64 +122,6 @@ async function insertLine(
   );
 }
 
-async function getARAccount(client) {
-  const {
-    rows: [ar],
-  } = await client.query(
-    `SELECT account_id FROM chart_of_accounts WHERE account_code = '1310' LIMIT 1`,
-  );
-  return ar || null;
-}
-
-async function getRevenueAccount(client) {
-  const {
-    rows: [rev],
-  } = await client.query(
-    `SELECT account_id FROM chart_of_accounts WHERE account_code = '4100' LIMIT 1`,
-  );
-  return rev || null;
-}
-
-async function getVATAccount(client) {
-  const {
-    rows: [vat],
-  } = await client.query(
-    `SELECT account_id FROM chart_of_accounts WHERE account_code = '2210' LIMIT 1`,
-  );
-  return vat || null;
-}
-
-async function insertJournalEntry(
-  client,
-  { description, referenceId, createdBy },
-) {
-  const {
-    rows: [entry],
-  } = await client
-    .query(
-      `INSERT INTO journal_entries
-       (entry_number, entry_date, description, reference_type, reference_id, posted_by)
-     SELECT 'JE-' || nextval('journal_entry_seq'), CURRENT_DATE, $1, 'invoice', $2, $3
-     RETURNING entry_id`,
-      [description, referenceId, createdBy],
-    )
-    .catch(() => ({ rows: [] }));
-  return entry || null;
-}
-
-async function insertJournalLines(
-  client,
-  { entryId, arId, totalAmount, revId, subtotal, vatId, vatAmount },
-) {
-  await client.query(
-    `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES
-     ($1, $2, $3, 0),
-     ($1, $4, 0, $5),
-     ($1, $6, 0, $7)`,
-    [entryId, arId, totalAmount, revId, subtotal, vatId, vatAmount],
-  );
-}
-
 async function insertPayment(
   client,
   {
@@ -251,11 +193,14 @@ module.exports = {
   findById,
   insert,
   insertLine,
-  getARAccount,
-  getRevenueAccount,
-  getVATAccount,
-  insertJournalEntry,
-  insertJournalLines,
+  // NOTE: getARAccount, getRevenueAccount, getVATAccount,
+  // insertJournalEntry, and insertJournalLines were removed in
+  // May 14 polish. Invoice journals are now posted through
+  // accounting/journal.service.postEntry, which provides DR=CR
+  // balance validation, fiscal period auto-assignment, and
+  // consistent entry numbering. The COA codes (1310 / 4100 /
+  // 2210) are passed to journalService.getAccountId directly
+  // from invoicing.service.postInvoiceJournal.
   insertPayment,
   getInvoiceNumberAndContact,
   setSent,

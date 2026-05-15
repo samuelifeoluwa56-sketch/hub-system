@@ -2,6 +2,7 @@
 
 const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
 const movements = require("./movements.service");
+const valuation = require("./valuation.service");
 const repo = require("./stock.repository");
 
 // ─────────────────────────────────────────────────────────────
@@ -12,9 +13,16 @@ const repo = require("./stock.repository");
 //   - valuation.service.js → cost basis, COGS, total stock value
 //
 // This file orchestrates: current-stock queries, transfers, adjustments,
-// low-stock alerts, location list. It re-exports recordMovement and
-// checkLowStock from movements.service so existing callers in POS,
-// sales, purchasing, and logistics continue to work unchanged.
+// low-stock alerts, location list. It re-exports the public API of both
+// sub-services so external callers (POS, sales, purchasing, invoicing,
+// logistics, retail-partners, dashboards) have a single import path:
+//
+//   const stockService = require("../stock/stock.service");
+//   await stockService.recordMovement(...);   // from movements
+//   await stockService.calculateLineCOGS(...); // from valuation
+//
+// This prevents the cross-module-boundary smell of every consumer
+// reaching into ../stock/valuation.service directly.
 // ─────────────────────────────────────────────────────────────
 
 async function getCurrentStock(
@@ -142,15 +150,35 @@ async function getLocations(business) {
 module.exports = {
   getCurrentStock,
   getMovements,
-  // Re-exported from movements.service so external callers
-  // (POS, sales, purchasing, logistics) keep their imports unchanged.
+  // ── Movements (re-exported from movements.service) ──────────
+  // POS, sales, purchasing, logistics already import these via
+  // stock.service so the import paths stay stable across modules.
   recordMovement: movements.recordMovement,
   checkLowStock: movements.checkLowStock,
-  // New capabilities surfaced via the stock service for convenience.
   getAvailableQty: movements.getAvailableQty,
   createReservation: movements.createReservation,
   releaseReservation: movements.releaseReservation,
-  // Local operations
+  convertReservationToSale: movements.convertReservationToSale,
+  expireReservations: movements.expireReservations,
+  // Semantic shortcuts for the four common movement cases.
+  recordSale: movements.recordSale,
+  recordReceipt: movements.recordReceipt,
+  recordWriteOff: movements.recordWriteOff,
+  recordReturnFromCustomer: movements.recordReturnFromCustomer,
+  // ── Valuation (re-exported from valuation.service) ──────────
+  // Per-product cost basis — used by POS/sales/invoicing to compute
+  // COGS at the moment of sale.
+  getUnitCost: valuation.getUnitCost,
+  getUnitCostForBusiness: valuation.getUnitCostForBusiness,
+  calculateLineCOGS: valuation.calculateLineCOGS,
+  calculateSaleCOGS: valuation.calculateSaleCOGS,
+  // Aggregate valuation — used by dashboards and the Balance Sheet
+  // inventory note.
+  getTotalValuation: valuation.getTotalValuation,
+  getTotalValuationForBusiness: valuation.getTotalValuationForBusiness,
+  getValuationByProduct: valuation.getValuationByProduct,
+  getValuationByProductForBusiness: valuation.getValuationByProductForBusiness,
+  // ── Local operations ────────────────────────────────────────
   createAdjustment,
   createTransfer,
   getLowStockAlerts,

@@ -4,6 +4,8 @@ const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
 const stockService = require("../stock/stock.service");
 const notifService = require("../../shared/notifications/notifications.service");
 const auditService = require("../../shared/audit/audit.service");
+const journalService = require("../accounting/journal.service");
+const logger = require("../../config/logger");
 const { emitToBusiness } = require("../../config/sockets");
 const sessionSvc = require("./session.service");
 const receiptSvc = require("./receipt.service");
@@ -278,6 +280,23 @@ async function createTransaction(business, data, user) {
       session_id: data.session_id,
     });
 
+    // Post the two accounting journals for this sale. Each POS sale
+    // produces:
+    //   1. Revenue journal — books cash receipt vs sales/VAT income
+    //   2. COGS journal    — relieves inventory and books cost
+    //
+    // Both run inside this same withBusinessContext transaction so if
+    // either fails the whole sale rolls back. Without these, the P&L
+    // would only show net sales but no cash receipt and no cost side.
+    await postPosRevenueJournal(
+      client,
+      business,
+      tx,
+      data.payments,
+      data.lines,
+    );
+    await postPosCOGSJournal(client, business, tx, data.lines);
+
     await auditService.log(client, {
       userId: user.user_id,
       userName: user.display_name || "staff",
@@ -343,6 +362,155 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
       before: tx,
     });
     return tx;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// JOURNAL POSTING
+// Every POS transaction produces two journals: one for the revenue
+// side (cash receipt vs sales income + VAT liability) and one for the
+// cost side (COGS expense vs inventory relief). Both go through the
+// canonical accounting/journal.service.postEntry, which validates
+// DR=CR balance and stamps the active fiscal period.
+//
+// Chart-of-accounts codes used (Nigerian SME convention):
+//   1100 — Cash on Hand          (asset)
+//   1210 — Bank account          (asset, used for card + transfer)
+//   1310 — Accounts Receivable   (asset, fallback for un-mapped methods)
+//   2210 — VAT Payable           (liability)
+//   4100 — Sales Revenue         (income)
+//   5000 — Cost of Goods Sold    (expense)
+//   1410 — Stock                 (asset — per-business named)
+// ─────────────────────────────────────────────────────────────
+
+// Map a POS payment_method to its receiving COA code.
+function paymentMethodToCOA(method) {
+  switch (method) {
+    case "cash":
+      return "1100";
+    case "bank_transfer":
+      return "1210";
+    case "pos_card":
+      return "1210";
+    case "paystack":
+      return "1210";
+    // Anything else (e.g. mixed split-payments we haven't mapped) goes
+    // to AR so it can be reconciled later rather than disappearing.
+    default:
+      return "1310";
+  }
+}
+
+async function postPosRevenueJournal(client, business, tx, payments, lines) {
+  // Sum subtotal and VAT across the sale lines. We recompute here rather
+  // than relying on the transaction header so the journal numbers match
+  // exactly what was posted to transaction_lines.
+  let subtotal = 0;
+  let vatTotal = 0;
+  for (const l of lines) {
+    const net =
+      parseFloat(l.unit_price) * parseInt(l.quantity) -
+      parseFloat(l.discount_amount || 0);
+    const vat = parseFloat((net * 0.075).toFixed(2));
+    subtotal += net;
+    vatTotal += vat;
+  }
+  subtotal = parseFloat(subtotal.toFixed(2));
+  vatTotal = parseFloat(vatTotal.toFixed(2));
+
+  // Group payments by COA code so multiple split-payments to the same
+  // destination (e.g. two cash payments) book as a single line.
+  const debitsByAccount = new Map();
+  for (const p of payments) {
+    const code = paymentMethodToCOA(p.payment_method);
+    const accId = await journalService.getAccountId(client, code);
+    if (!accId) {
+      logger.warn(
+        `[pos] revenue journal — missing COA account ${code} for method ${p.payment_method}`,
+      );
+      continue;
+    }
+    debitsByAccount.set(
+      accId,
+      (debitsByAccount.get(accId) || 0) + parseFloat(p.amount),
+    );
+  }
+
+  const revAcc = await journalService.getAccountId(client, "4100");
+  const vatAcc = await journalService.getAccountId(client, "2210");
+  if (!revAcc) {
+    logger.warn(
+      `[pos] revenue journal skipped for tx ${tx.transaction_number}: missing COA 4100`,
+    );
+    return;
+  }
+
+  // Build the lines:
+  //   DR Cash/Bank   per-account totals
+  //     CR Sales Revenue   subtotal
+  //     CR VAT Payable     vatTotal  (only if VAT present)
+  const journalLines = [];
+  for (const [accId, amount] of debitsByAccount.entries()) {
+    if (amount > 0)
+      journalLines.push({
+        account_id: accId,
+        debit: parseFloat(amount.toFixed(2)),
+        credit: 0,
+      });
+  }
+  journalLines.push({ account_id: revAcc, debit: 0, credit: subtotal });
+  if (vatAcc && vatTotal > 0) {
+    journalLines.push({ account_id: vatAcc, debit: 0, credit: vatTotal });
+  }
+
+  await journalService.postEntry(client, {
+    description: `POS Sale ${tx.transaction_number}`,
+    referenceType: "pos_transaction",
+    referenceId: tx.transaction_id,
+    postedBy: tx.served_by,
+    lines: journalLines,
+  });
+}
+
+async function postPosCOGSJournal(client, business, tx, lines) {
+  // Compute total COGS using weighted-average unit cost. Skip lines
+  // with no product_id (manual line items, services).
+  const costable = lines.filter((l) => l.product_id);
+  if (costable.length === 0) return;
+
+  const { total_cost } = await stockService.calculateSaleCOGS(
+    client,
+    costable.map((l) => ({ product_id: l.product_id, quantity: l.quantity })),
+  );
+
+  if (!total_cost || total_cost <= 0) {
+    logger.warn(
+      `[pos] COGS journal skipped for tx ${tx.transaction_number}: no cost data`,
+    );
+    return;
+  }
+
+  const cogsAcc = await journalService.getAccountId(client, "5000");
+  const inventoryAcc = await journalService.getAccountId(client, "1410");
+  if (!cogsAcc || !inventoryAcc) {
+    logger.warn(
+      `[pos] COGS journal skipped for tx ${tx.transaction_number}: ` +
+        `missing COA cogs=${cogsAcc ? "ok" : "5000"} inv=${inventoryAcc ? "ok" : "1410"}`,
+    );
+    return;
+  }
+
+  //   DR Cost of Goods Sold   total_cost
+  //     CR Stock              total_cost
+  await journalService.postEntry(client, {
+    description: `COGS for POS Sale ${tx.transaction_number}`,
+    referenceType: "pos_transaction_cogs",
+    referenceId: tx.transaction_id,
+    postedBy: tx.served_by,
+    lines: [
+      { account_id: cogsAcc, debit: total_cost, credit: 0 },
+      { account_id: inventoryAcc, debit: 0, credit: total_cost },
+    ],
   });
 }
 

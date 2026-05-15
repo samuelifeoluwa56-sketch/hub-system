@@ -107,6 +107,7 @@ router.use(
   protect,
   require("../modules/campaigns/campaigns.routes"),
 );
+router.use("/social", protect, require("../modules/social/social.routes"));
 router.use(
   "/dashboards",
   protect,

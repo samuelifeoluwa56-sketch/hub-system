@@ -116,38 +116,13 @@ async function approveRun(client, { runId, userId }) {
   return run || null;
 }
 
-async function getCOAAccount(client, code) {
-  const {
-    rows: [acc],
-  } = await client.query(
-    `SELECT account_id FROM chart_of_accounts WHERE account_code=$1 LIMIT 1`,
-    [code],
-  );
-  return acc || null;
-}
-
-async function insertJournalEntry(
-  client,
-  { entryNumber, description, referenceId, approvedBy },
-) {
-  const {
-    rows: [entry],
-  } = await client.query(
-    `INSERT INTO journal_entries (entry_number, entry_date, description, reference_type, reference_id, posted_by) VALUES ($1, CURRENT_DATE, $2, 'payroll_run', $3, $4) RETURNING entry_id`,
-    [entryNumber, description, referenceId, approvedBy],
-  );
-  return entry;
-}
-
-async function insertJournalLine(
-  client,
-  { entry_id, account_id, debit, credit },
-) {
-  await client.query(
-    `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1,$2,$3,$4)`,
-    [entry_id, account_id, debit, credit],
-  );
-}
+// NOTE: getCOAAccount, insertJournalEntry, and insertJournalLine were
+// removed in May 14 polish. Payroll journals are now posted through
+// the canonical accounting/journal.service.postEntry, which provides:
+//   - DR=CR balance validation (with 0.01 tolerance)
+//   - fiscal period auto-assignment
+//   - consistent entry numbering across all modules
+// See modules/payroll/payroll.service.js → postPayrollJournal.
 
 async function markPaid(client, runId) {
   const {
@@ -237,9 +212,6 @@ module.exports = {
   updateRunTotals,
   findRunById,
   approveRun,
-  getCOAAccount,
-  insertJournalEntry,
-  insertJournalLine,
   markPaid,
   settleAdvances,
   attachCommissions,
