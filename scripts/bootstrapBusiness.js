@@ -60,6 +60,7 @@ const TEMPLATE_ORDER = [
   "000021_triggers.sql.template",
   // Sprint 4 schema gaps (per-business additions)
   "000023_close_sprint3_schema_gaps.sql.template",
+  "000024_loyalty_management.sql.template",
 ];
 
 // Document types that should be seeded for every new business —
@@ -219,7 +220,10 @@ async function bootstrap(opts) {
       await client.query(
         `INSERT INTO shared.document_numbering
            (business, document_type, prefix, next_number, padding)
-         VALUES ($1, $2, $3, 1, 4)`,
+         VALUES ($1, $2, $3, 1, 4)
+         ON CONFLICT (business, document_type)
+         DO UPDATE SET
+          prefix = EXCLUDED.prefix`,
         [opts.key, dt.type, `${opts.prefix}-${dt.suffix}`],
       );
     }
@@ -349,5 +353,14 @@ Example:
 if (require.main === module) {
   main();
 }
+
+// ─────────────────────────────────────────────────────────────
+// PS COMMAND
+// ─────────────────────────────────────────────────────────────
+
+// Ensure to update template files in templates/ if a template is added or remove shape changes (e.g. adding loyalty_settings) before running command.
+
+// For a new diffusers business, the command would be:
+//  node scripts/bootstrapBusiness.js --key diffusers --display-name "Hub Diffusers" --legal-name "Hub DIFFUSERS Ltd" --prefix DFS
 
 module.exports = { bootstrap, validateKey, validatePrefix };

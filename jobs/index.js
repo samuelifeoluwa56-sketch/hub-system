@@ -75,6 +75,11 @@ function start() {
   );
   register("cleanupSessions", "0 3 * * *", require("./cleanupSessions"));
   register(
+    "expireLoyaltyPoints",
+    "0 2 * * *",
+    require("./expireLoyaltyPoints"),
+  );
+  register(
     "replayFailedWebhooks",
     "*/30 * * * *",
     require("./replayFailedWebhooks"),

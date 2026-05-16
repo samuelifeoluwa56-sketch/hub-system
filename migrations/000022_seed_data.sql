@@ -20,9 +20,9 @@ DO $$
 DECLARE
   v_owner_id UUID := '00000001-0000-0000-0000-000000000001';
   v_modules  TEXT[] := ARRAY['crm','sales','pos','invoicing','accounting','stock',
-                              'purchasing','expenses','payroll','logistics',
-                              'retail_partners','messaging','campaigns','social','calendar',
-                              'tasks','dashboards','documents','staff','settings'];
+                              'catalogue','purchasing','expenses','payroll','logistics',
+                              'retail_partners','messaging','campaigns','social','loyalty',
+                              'calendar','tasks','dashboards','documents','staff','settings'];
   v_actions  TEXT[] := ARRAY['view','create','edit','delete','approve','export'];
   m TEXT;
   a TEXT;
@@ -41,9 +41,9 @@ DO $$
 DECLARE
   v_manager_id UUID := '00000001-0000-0000-0000-000000000002';
   v_modules    TEXT[] := ARRAY['crm','sales','pos','invoicing','accounting','stock',
-                                'purchasing','expenses','payroll','logistics',
-                                'retail_partners','messaging','campaigns','social','calendar',
-                                'tasks','dashboards','documents','staff'];
+                                'catalogue','purchasing','expenses','payroll','logistics',
+                                'retail_partners','messaging','campaigns','social','loyalty',
+                                'calendar','tasks','dashboards','documents','staff'];
   v_actions    TEXT[] := ARRAY['view','create','edit','delete','approve','export'];
   m TEXT; a TEXT;
 BEGIN

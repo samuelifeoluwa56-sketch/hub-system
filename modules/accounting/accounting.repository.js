@@ -13,6 +13,86 @@ async function findAccounts(client, { type, active }) {
   return rows;
 }
 
+async function findAccountById(client, accountId) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `SELECT * FROM chart_of_accounts WHERE account_id = $1`,
+    [accountId],
+  );
+  return row || null;
+}
+
+async function findAccountByCode(client, accountCode) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `SELECT account_id, account_code, is_system FROM chart_of_accounts
+     WHERE account_code = $1 LIMIT 1`,
+    [accountCode],
+  );
+  return row || null;
+}
+
+async function insertAccount(
+  client,
+  {
+    accountCode,
+    accountName,
+    accountType,
+    accountSubtype,
+    parentAccountId,
+    description,
+  },
+) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `INSERT INTO chart_of_accounts
+       (account_code, account_name, account_type, account_subtype,
+        parent_account_id, description, is_system)
+     VALUES ($1, $2, $3, $4, $5, $6, false)
+     RETURNING *`,
+    [
+      accountCode,
+      accountName,
+      accountType,
+      accountSubtype || null,
+      parentAccountId || null,
+      description || null,
+    ],
+  );
+  return row;
+}
+
+async function updateAccount(client, accountId, fields) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `UPDATE chart_of_accounts SET
+       account_code      = COALESCE($2, account_code),
+       account_name      = COALESCE($3, account_name),
+       account_type      = COALESCE($4, account_type),
+       account_subtype   = COALESCE($5, account_subtype),
+       parent_account_id = COALESCE($6, parent_account_id),
+       description       = COALESCE($7, description),
+       is_active         = COALESCE($8, is_active)
+     WHERE account_id = $1
+     RETURNING *`,
+    [
+      accountId,
+      fields.accountCode ?? null,
+      fields.accountName ?? null,
+      fields.accountType ?? null,
+      fields.accountSubtype ?? null,
+      fields.parentAccountId ?? null,
+      fields.description ?? null,
+      fields.isActive ?? null,
+    ],
+  );
+  return row || null;
+}
+
 async function findJournals(
   client,
   { startDate, endDate, referenceType, limit, offset },
@@ -229,6 +309,10 @@ async function getTrialBalanceData(client, { startDate, endDate }) {
 
 module.exports = {
   findAccounts,
+  findAccountById,
+  findAccountByCode,
+  insertAccount,
+  updateAccount,
   findJournals,
   findJournalById,
   insertJournalEntry,

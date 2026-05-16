@@ -52,6 +52,7 @@ const DOCUMENT_TYPES = {
   authenticity_certificate: "product-specific",
   warranty_card: "product-specific",
   appraisal: "product-specific",
+  product_image: "product-specific",
   // staff / hr
   employment_contract: "hr",
   nda: "hr",

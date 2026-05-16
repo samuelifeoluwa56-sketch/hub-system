@@ -1,0 +1,14 @@
+-- Add updated_at to loyalty_tiers for audit tracking
+ALTER TABLE {{BUSINESS}}.loyalty_tiers
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS updated_by UUID;
+
+DROP TRIGGER IF EXISTS trg_{{BUSINESS}}_loyalty_tiers_updated_at
+  ON {{BUSINESS}}.loyalty_tiers;
+CREATE TRIGGER trg_{{BUSINESS}}_loyalty_tiers_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.loyalty_tiers
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- Index for tier queries
+CREATE INDEX IF NOT EXISTS idx_{{BUSINESS}}_loyalty_tiers_active
+    ON {{BUSINESS}}.loyalty_tiers (display_order) WHERE display_order > 0;

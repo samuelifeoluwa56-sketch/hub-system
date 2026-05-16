@@ -10,6 +10,7 @@ const { sendWithAttachment } = require("../../lib/email/sender");
 const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
 const logger = require("../../config/logger");
 const repo = require("./invoicing.repository");
+const loyaltyService = require("../loyalty/loyalty.service");
 
 async function list(
   business,
@@ -222,8 +223,13 @@ async function postSaleCOGSJournal(client, business, invoice, invoiceLines) {
 }
 
 async function recordPayment(business, invoiceId, data, user) {
-  return withBusinessContext(business, async (client) => {
-    const payment = await repo.insertPayment(client, {
+  let contactId = null;
+
+  const payment = await withBusinessContext(business, async (client) => {
+    const inv = await repo.getInvoiceNumberAndContact(client, invoiceId);
+    contactId = inv?.contact_id || null;
+
+    const p = await repo.insertPayment(client, {
       invoiceId,
       payment_date: data.payment_date,
       amount: data.amount,
@@ -242,12 +248,20 @@ async function recordPayment(business, invoiceId, data, user) {
       module: "invoicing",
       action: "create",
       table: "invoice_payments",
-      recordId: payment.payment_id,
-      after: payment,
+      recordId: p.payment_id,
+      after: p,
     });
 
-    return payment;
+    return p;
   });
+
+  if (contactId && data.is_confirmed !== false) {
+    loyaltyService
+      .awardPoints(business, contactId, data.amount, "invoice_payment", payment.payment_id, user)
+      .catch((err) => logger.error("[loyalty] award failed after invoice payment", err));
+  }
+
+  return payment;
 }
 
 async function send(business, invoiceId, { channel = "email" }, user) {

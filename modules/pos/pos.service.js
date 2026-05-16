@@ -10,6 +10,7 @@ const { emitToBusiness } = require("../../config/sockets");
 const sessionSvc = require("./session.service");
 const receiptSvc = require("./receipt.service");
 const repo = require("./pos.repository");
+const loyaltyService = require("../loyalty/loyalty.service");
 
 // ─────────────────────────────────────────────────────────────
 // POS service — coordination layer for the point of sale.
@@ -156,7 +157,7 @@ async function markReconciled(business, sessionId, body, user) {
 }
 
 async function createTransaction(business, data, user) {
-  return withBusinessContext(business, async (client) => {
+  const result = await withBusinessContext(business, async (client) => {
     const session = await repo.validateOpenSession(client, data.session_id);
     if (!session)
       throw Object.assign(new Error("No open session found"), { status: 400 });
@@ -313,6 +314,14 @@ async function createTransaction(business, data, user) {
     });
     return { ...tx, change_given: change };
   });
+
+  if (data.contact_id) {
+    loyaltyService
+      .awardPoints(business, data.contact_id, result.total_amount, "pos_transaction", result.transaction_id, user)
+      .catch((err) => logger.error("[loyalty] award failed after POS transaction", err));
+  }
+
+  return result;
 }
 
 async function getTransaction(business, transactionId) {

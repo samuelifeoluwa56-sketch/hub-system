@@ -98,6 +98,11 @@ router.use(
   require("../modules/logistics/logistics.routes"),
 );
 router.use(
+  "/catalogue",
+  protect,
+  require("../modules/catalogue/catalogue.routes"),
+);
+router.use(
   "/retail-partners",
   protect,
   require("../modules/retail-partners/retail-partners.routes"),
@@ -108,6 +113,7 @@ router.use(
   require("../modules/campaigns/campaigns.routes"),
 );
 router.use("/social", protect, require("../modules/social/social.routes"));
+router.use("/loyalty", protect, require("../modules/loyalty/loyalty.routes"));
 router.use(
   "/dashboards",
   protect,

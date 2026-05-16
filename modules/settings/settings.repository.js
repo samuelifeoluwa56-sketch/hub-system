@@ -36,7 +36,7 @@ async function insertBusiness(client, data) {
        (business_key, display_name, legal_name, address, phone, email, website,
         tin, cac_number, logo_path, accent_colour, fiscal_year_start,
         default_currency, vat_number, vat_rate, wht_rate,
-        mission_statement, brand_fonts, cash_handling_rules, payment_methods)
+        mission_statement, brand_fonts, cash_handling_rules, payment_methods, loyalty_settings)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      RETURNING *`,
     [
@@ -60,6 +60,7 @@ async function insertBusiness(client, data) {
       JSON.stringify(data.brand_fonts || {}),
       JSON.stringify(data.cash_handling_rules || {}),
       JSON.stringify(data.payment_methods || {}),
+      JSON.stringify(data.loyalty_settings || {}),
     ],
   );
   return row;
@@ -87,6 +88,7 @@ async function updateBusiness(client, businessKey, fields) {
     "brand_fonts",
     "cash_handling_rules",
     "payment_methods",
+    "loyalty_settings",
     "is_active",
   ];
   const sets = [];
@@ -95,7 +97,7 @@ async function updateBusiness(client, businessKey, fields) {
   for (const key of allowed) {
     if (fields[key] === undefined) continue;
     if (
-      ["brand_fonts", "cash_handling_rules", "payment_methods"].includes(key)
+      ["brand_fonts", "cash_handling_rules", "payment_methods", "loyalty_settings"].includes(key)
     ) {
       sets.push(`${key} = $${i++}::jsonb`);
       values.push(JSON.stringify(fields[key]));

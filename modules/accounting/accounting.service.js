@@ -16,6 +16,121 @@ async function listAccounts(business, { type, active = "true" } = {}) {
   });
 }
 
+// ── Chart of accounts CRUD ───────────────────────────────────
+//
+// Seeded accounts (is_system=true) are protected — they're the
+// statutory minimum a Nigerian SME needs (sales revenue, VAT
+// payable, PAYE payable, etc.) and removing them would break
+// downstream modules. Admin can add custom accounts for new
+// bank accounts, expense categories, or revenue lines.
+//
+// Only 5 account_types are allowed (CHECK constraint in schema):
+//   asset, liability, equity, income, expense.
+
+const VALID_ACCOUNT_TYPES = [
+  "asset",
+  "liability",
+  "equity",
+  "income",
+  "expense",
+];
+
+async function createAccount(business, data, user) {
+  if (!data.account_code || !data.account_name || !data.account_type) {
+    throw Object.assign(
+      new Error("account_code, account_name and account_type are required"),
+      { status: 400 },
+    );
+  }
+  if (!VALID_ACCOUNT_TYPES.includes(data.account_type)) {
+    throw Object.assign(
+      new Error(
+        `account_type must be one of: ${VALID_ACCOUNT_TYPES.join(", ")}`,
+      ),
+      { status: 400 },
+    );
+  }
+  return withBusinessContext(business, async (client) => {
+    // Reject duplicate codes — account_code must uniquely identify
+    // an account within a business's books.
+    const dupe = await repo.findAccountByCode(client, data.account_code);
+    if (dupe) {
+      throw Object.assign(
+        new Error(`Account code "${data.account_code}" already exists`),
+        { status: 409 },
+      );
+    }
+    const row = await repo.insertAccount(client, {
+      accountCode: data.account_code,
+      accountName: data.account_name,
+      accountType: data.account_type,
+      accountSubtype: data.account_subtype,
+      parentAccountId: data.parent_account_id,
+      description: data.description,
+    });
+    await auditService.log(client, {
+      userId: user.user_id,
+      userName: user.display_name || "staff",
+      business,
+      module: "accounting",
+      action: "create",
+      table: "chart_of_accounts",
+      recordId: row.account_id,
+      after: row,
+      metadata: { sensitive: true },
+    });
+    return row;
+  });
+}
+
+async function updateAccount(business, accountId, data, user) {
+  return withBusinessContext(business, async (client) => {
+    const before = await repo.findAccountById(client, accountId);
+    if (!before) {
+      throw Object.assign(new Error("Account not found"), { status: 404 });
+    }
+    // System accounts can't be renamed or have their code/type changed
+    // — the rest of the codebase relies on stable codes like 4100
+    // for sales revenue. Admin CAN archive (is_active=false) and
+    // CAN update description.
+    if (
+      before.is_system &&
+      (data.account_code || data.account_name || data.account_type)
+    ) {
+      throw Object.assign(
+        new Error(
+          "System accounts cannot have account_code, account_name, or " +
+            "account_type changed. You may archive (is_active=false) or " +
+            "update description.",
+        ),
+        { status: 400 },
+      );
+    }
+    const row = await repo.updateAccount(client, accountId, {
+      accountCode: data.account_code,
+      accountName: data.account_name,
+      accountType: data.account_type,
+      accountSubtype: data.account_subtype,
+      parentAccountId: data.parent_account_id,
+      description: data.description,
+      isActive: data.is_active,
+    });
+    await auditService.log(client, {
+      userId: user.user_id,
+      userName: user.display_name || "staff",
+      business,
+      module: "accounting",
+      action: "edit",
+      table: "chart_of_accounts",
+      recordId: accountId,
+      before,
+      after: row,
+      metadata: { sensitive: true },
+    });
+    return row;
+  });
+}
+
 // ─── Journal entries ─────────────────────────────────────────────────────────
 
 async function listJournals(
@@ -197,6 +312,8 @@ async function closePeriod(business, periodId, user) {
 
 module.exports = {
   listAccounts,
+  createAccount,
+  updateAccount,
   listJournals,
   getJournal,
   createManualJournal,
