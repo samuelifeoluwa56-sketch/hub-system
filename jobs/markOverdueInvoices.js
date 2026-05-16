@@ -2,9 +2,10 @@
 const { pool } = require("../config/db");
 const logger = require("../config/logger");
 const { emitToBusiness } = require("../config/sockets");
+const { getActiveBusinesses } = require("../config/businesses");
 
 module.exports = async function markOverdueInvoices() {
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     const count = await pool.query(
       `SELECT ${business}.fn_mark_overdue_invoices()`,
     );

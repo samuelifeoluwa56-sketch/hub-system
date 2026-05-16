@@ -17,10 +17,17 @@ router.get("/runs", can("payroll", "view"), async (req, res, next) => {
 });
 
 // POST /api/payroll/runs — initiate new payroll run
+//
+// period_year accepts any year within 5 years of the current one — this
+// covers backdating corrections and pre-funding future periods, while
+// preventing typos that would create payslips for 1999 or 9999.
+const MIN_YEAR = new Date().getFullYear() - 5;
+const MAX_YEAR = new Date().getFullYear() + 5;
+
 router.post(
   "/runs",
   body("period_month").isInt({ min: 1, max: 12 }),
-  body("period_year").isInt({ min: 2024 }),
+  body("period_year").isInt({ min: MIN_YEAR, max: MAX_YEAR }),
   validate,
   can("payroll", "create"),
   async (req, res, next) => {

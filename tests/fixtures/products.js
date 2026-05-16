@@ -1,2 +1,99 @@
 "use strict";
-// TODO: products.js
+
+/**
+ * Product Test Fixtures
+ * Provides test data for inventory and products
+ */
+
+const crypto = require("crypto");
+
+const TEST_PRODUCTS = [
+  {
+    product_id: crypto.randomUUID(),
+    sku: "SHIRT-001",
+    barcode: "1234567890123",
+    name: "Blue Cotton T-Shirt",
+    description: "A comfortable blue cotton t-shirt",
+    category_id: crypto.randomUUID(),
+    category_name: "Apparel",
+    unit_cost: 800,
+    selling_price: 1500,
+    markup_percentage: 87.5,
+    stock_quantity: 150,
+    reorder_level: 50,
+    reorder_quantity: 100,
+    unit_of_measure: "piece",
+    weight: 0.25,
+    dimensions: "Medium",
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    product_id: crypto.randomUUID(),
+    sku: "PANTS-001",
+    barcode: "1234567890124",
+    name: "Black Jeans",
+    description: "Classic black denim jeans",
+    category_id: crypto.randomUUID(),
+    category_name: "Apparel",
+    unit_cost: 2000,
+    selling_price: 4500,
+    markup_percentage: 125,
+    stock_quantity: 75,
+    reorder_level: 30,
+    reorder_quantity: 50,
+    unit_of_measure: "piece",
+    weight: 0.6,
+    dimensions: "Various sizes",
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    product_id: crypto.randomUUID(),
+    sku: "SHOES-001",
+    barcode: "1234567890125",
+    name: "White Sneakers",
+    description: "Comfortable white athletic sneakers",
+    category_id: crypto.randomUUID(),
+    category_name: "Footwear",
+    unit_cost: 3500,
+    selling_price: 8500,
+    markup_percentage: 142.86,
+    stock_quantity: 45,
+    reorder_level: 20,
+    reorder_quantity: 50,
+    unit_of_measure: "pair",
+    weight: 0.5,
+    dimensions: "Unisex sizes",
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    product_id: crypto.randomUUID(),
+    sku: "HAT-001",
+    barcode: "1234567890126",
+    name: "Baseball Cap",
+    description: "Classic adjustable baseball cap",
+    category_id: crypto.randomUUID(),
+    category_name: "Accessories",
+    unit_cost: 500,
+    selling_price: 1200,
+    markup_percentage: 140,
+    stock_quantity: 200,
+    reorder_level: 100,
+    reorder_quantity: 200,
+    unit_of_measure: "piece",
+    weight: 0.1,
+    dimensions: "One size fits all",
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+];
+
+module.exports = {
+  TEST_PRODUCTS,
+};

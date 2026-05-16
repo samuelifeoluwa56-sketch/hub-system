@@ -4,8 +4,25 @@ const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
 const stockService = require("../stock/stock.service");
 const notifService = require("../../shared/notifications/notifications.service");
 const auditService = require("../../shared/audit/audit.service");
+const journalService = require("../accounting/journal.service");
+const logger = require("../../config/logger");
 const { emitToBusiness } = require("../../config/sockets");
+const sessionSvc = require("./session.service");
+const receiptSvc = require("./receipt.service");
 const repo = require("./pos.repository");
+const loyaltyService = require("../loyalty/loyalty.service");
+
+// ─────────────────────────────────────────────────────────────
+// POS service — coordination layer for the point of sale.
+//
+// Heavy lifting in two sub-services:
+//   - session.service.js → reconciliation, X/Z reports, variance
+//   - receipt.service.js → PDF rendering, WhatsApp/email delivery
+//
+// This file handles the transaction flow itself (taking payment,
+// recording stock movement, splitting payment methods) and session
+// open/close orchestration.
+// ─────────────────────────────────────────────────────────────
 
 async function getTerminals(business) {
   return withBusinessContext(business, async (client) => {
@@ -51,7 +68,13 @@ async function closeSession(
   user,
 ) {
   return withBusinessContext(business, async (client) => {
+    // Pull totals BEFORE closing — they're calculated from
+    // pos_payment_splits which is read-only at this point.
     const totals = await repo.getSessionTotals(client, sessionId);
+    const sessionBefore = await repo.findSessionById(client, sessionId);
+    if (!sessionBefore) {
+      throw Object.assign(new Error("Session not found"), { status: 404 });
+    }
 
     const session = await repo.closeSession(client, {
       sessionId,
@@ -79,13 +102,62 @@ async function closeSession(
       transfer_total: totals.transfer_total,
     });
 
-    emitToBusiness(business, "pos:session_closed", { sessionId });
-    return session;
+    // Reconciliation analysis (variance, manager flagging) lives in the
+    // session sub-service. Cash variance is calculated against opening
+    // float + cash sales, not just cash sales — common reconciliation
+    // bug that misses the float.
+    const reconciliation = await sessionSvc.reconcileSession(client, {
+      business,
+      sessionId,
+      openingFloat: sessionBefore.opening_float,
+      actualCash: actual_cash,
+      user,
+      reconciliationNotes: reconciliation_notes,
+    });
+
+    emitToBusiness(business, "pos:session_closed", {
+      sessionId,
+      variance: reconciliation.cash_reconciliation.variance,
+    });
+    return { ...session, reconciliation };
   });
 }
 
+// X report (mid-shift snapshot) and Z report (closed-session totals).
+async function getXReport(business, sessionId) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.getXReport(client, sessionId),
+  );
+}
+
+async function getZReport(business, sessionId) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.getZReport(client, sessionId),
+  );
+}
+
+async function listSessionsWithVariance(business, query) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.listSessionsWithVariance(client, {
+      terminalId: query.terminal_id,
+      days: parseInt(query.days) || 30,
+    }),
+  );
+}
+
+async function markReconciled(business, sessionId, body, user) {
+  return withBusinessContext(business, (client) =>
+    sessionSvc.markReconciled(client, {
+      business,
+      sessionId,
+      manager: user,
+      sign_off_notes: body?.sign_off_notes,
+    }),
+  );
+}
+
 async function createTransaction(business, data, user) {
-  return withBusinessContext(business, async (client) => {
+  const result = await withBusinessContext(business, async (client) => {
     const session = await repo.validateOpenSession(client, data.session_id);
     if (!session)
       throw Object.assign(new Error("No open session found"), { status: 400 });
@@ -176,7 +248,7 @@ async function createTransaction(business, data, user) {
         await stockService.recordMovement(client, {
           business,
           productId: l.product_id,
-          movementType: "pos_sale",
+          movementType: "sold",
           quantity: l.quantity,
           direction: -1,
           referenceType: "pos_transaction",
@@ -209,9 +281,26 @@ async function createTransaction(business, data, user) {
       session_id: data.session_id,
     });
 
+    // Post the two accounting journals for this sale. Each POS sale
+    // produces:
+    //   1. Revenue journal — books cash receipt vs sales/VAT income
+    //   2. COGS journal    — relieves inventory and books cost
+    //
+    // Both run inside this same withBusinessContext transaction so if
+    // either fails the whole sale rolls back. Without these, the P&L
+    // would only show net sales but no cash receipt and no cost side.
+    await postPosRevenueJournal(
+      client,
+      business,
+      tx,
+      data.payments,
+      data.lines,
+    );
+    await postPosCOGSJournal(client, business, tx, data.lines);
+
     await auditService.log(client, {
       userId: user.user_id,
-      userName: "staff",
+      userName: user.display_name || "staff",
       business,
       module: "pos",
       action: "create",
@@ -225,6 +314,14 @@ async function createTransaction(business, data, user) {
     });
     return { ...tx, change_given: change };
   });
+
+  if (data.contact_id) {
+    loyaltyService
+      .awardPoints(business, data.contact_id, result.total_amount, "pos_transaction", result.transaction_id, user)
+      .catch((err) => logger.error("[loyalty] award failed after POS transaction", err));
+  }
+
+  return result;
 }
 
 async function getTransaction(business, transactionId) {
@@ -253,7 +350,7 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
       await stockService.recordMovement(client, {
         business,
         productId: l.product_id,
-        movementType: "returned_from_customer",
+        movementType: "return_from_customer",
         quantity: l.quantity,
         direction: 1,
         referenceType: "pos_transaction",
@@ -265,7 +362,7 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
 
     await auditService.log(client, {
       userId: user.user_id,
-      userName: "staff",
+      userName: user.display_name || "staff",
       business,
       module: "pos",
       action: "delete",
@@ -277,16 +374,163 @@ async function voidTransaction(business, transactionId, { void_reason }, user) {
   });
 }
 
-async function sendReceipt(business, transactionId, { channel = "whatsapp" }) {
-  const tx = await getTransaction(business, transactionId);
-  if (channel === "whatsapp" && tx.primary_phone) {
-    const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
-    await whatsapp.sendMessage({
-      to: tx.primary_phone,
-      text: `Receipt ${tx.transaction_number} — Total: ₦${Number(tx.total_amount).toLocaleString()}. Change: ₦${Number(tx.change_given).toLocaleString()}. Thank you for shopping with us!`,
-    });
+// ─────────────────────────────────────────────────────────────
+// JOURNAL POSTING
+// Every POS transaction produces two journals: one for the revenue
+// side (cash receipt vs sales income + VAT liability) and one for the
+// cost side (COGS expense vs inventory relief). Both go through the
+// canonical accounting/journal.service.postEntry, which validates
+// DR=CR balance and stamps the active fiscal period.
+//
+// Chart-of-accounts codes used (Nigerian SME convention):
+//   1100 — Cash on Hand          (asset)
+//   1210 — Bank account          (asset, used for card + transfer)
+//   1310 — Accounts Receivable   (asset, fallback for un-mapped methods)
+//   2210 — VAT Payable           (liability)
+//   4100 — Sales Revenue         (income)
+//   5000 — Cost of Goods Sold    (expense)
+//   1410 — Stock                 (asset — per-business named)
+// ─────────────────────────────────────────────────────────────
+
+// Map a POS payment_method to its receiving COA code.
+function paymentMethodToCOA(method) {
+  switch (method) {
+    case "cash":
+      return "1100";
+    case "bank_transfer":
+      return "1210";
+    case "pos_card":
+      return "1210";
+    case "paystack":
+      return "1210";
+    // Anything else (e.g. mixed split-payments we haven't mapped) goes
+    // to AR so it can be reconciled later rather than disappearing.
+    default:
+      return "1310";
   }
-  return { message: "Receipt sent" };
+}
+
+async function postPosRevenueJournal(client, business, tx, payments, lines) {
+  // Sum subtotal and VAT across the sale lines. We recompute here rather
+  // than relying on the transaction header so the journal numbers match
+  // exactly what was posted to transaction_lines.
+  let subtotal = 0;
+  let vatTotal = 0;
+  for (const l of lines) {
+    const net =
+      parseFloat(l.unit_price) * parseInt(l.quantity) -
+      parseFloat(l.discount_amount || 0);
+    const vat = parseFloat((net * 0.075).toFixed(2));
+    subtotal += net;
+    vatTotal += vat;
+  }
+  subtotal = parseFloat(subtotal.toFixed(2));
+  vatTotal = parseFloat(vatTotal.toFixed(2));
+
+  // Group payments by COA code so multiple split-payments to the same
+  // destination (e.g. two cash payments) book as a single line.
+  const debitsByAccount = new Map();
+  for (const p of payments) {
+    const code = paymentMethodToCOA(p.payment_method);
+    const accId = await journalService.getAccountId(client, code);
+    if (!accId) {
+      logger.warn(
+        `[pos] revenue journal — missing COA account ${code} for method ${p.payment_method}`,
+      );
+      continue;
+    }
+    debitsByAccount.set(
+      accId,
+      (debitsByAccount.get(accId) || 0) + parseFloat(p.amount),
+    );
+  }
+
+  const revAcc = await journalService.getAccountId(client, "4100");
+  const vatAcc = await journalService.getAccountId(client, "2210");
+  if (!revAcc) {
+    logger.warn(
+      `[pos] revenue journal skipped for tx ${tx.transaction_number}: missing COA 4100`,
+    );
+    return;
+  }
+
+  // Build the lines:
+  //   DR Cash/Bank   per-account totals
+  //     CR Sales Revenue   subtotal
+  //     CR VAT Payable     vatTotal  (only if VAT present)
+  const journalLines = [];
+  for (const [accId, amount] of debitsByAccount.entries()) {
+    if (amount > 0)
+      journalLines.push({
+        account_id: accId,
+        debit: parseFloat(amount.toFixed(2)),
+        credit: 0,
+      });
+  }
+  journalLines.push({ account_id: revAcc, debit: 0, credit: subtotal });
+  if (vatAcc && vatTotal > 0) {
+    journalLines.push({ account_id: vatAcc, debit: 0, credit: vatTotal });
+  }
+
+  await journalService.postEntry(client, {
+    description: `POS Sale ${tx.transaction_number}`,
+    referenceType: "pos_transaction",
+    referenceId: tx.transaction_id,
+    postedBy: tx.served_by,
+    lines: journalLines,
+  });
+}
+
+async function postPosCOGSJournal(client, business, tx, lines) {
+  // Compute total COGS using weighted-average unit cost. Skip lines
+  // with no product_id (manual line items, services).
+  const costable = lines.filter((l) => l.product_id);
+  if (costable.length === 0) return;
+
+  const { total_cost } = await stockService.calculateSaleCOGS(
+    client,
+    costable.map((l) => ({ product_id: l.product_id, quantity: l.quantity })),
+  );
+
+  if (!total_cost || total_cost <= 0) {
+    logger.warn(
+      `[pos] COGS journal skipped for tx ${tx.transaction_number}: no cost data`,
+    );
+    return;
+  }
+
+  const cogsAcc = await journalService.getAccountId(client, "5000");
+  const inventoryAcc = await journalService.getAccountId(client, "1410");
+  if (!cogsAcc || !inventoryAcc) {
+    logger.warn(
+      `[pos] COGS journal skipped for tx ${tx.transaction_number}: ` +
+        `missing COA cogs=${cogsAcc ? "ok" : "5000"} inv=${inventoryAcc ? "ok" : "1410"}`,
+    );
+    return;
+  }
+
+  //   DR Cost of Goods Sold   total_cost
+  //     CR Stock              total_cost
+  await journalService.postEntry(client, {
+    description: `COGS for POS Sale ${tx.transaction_number}`,
+    referenceType: "pos_transaction_cogs",
+    referenceId: tx.transaction_id,
+    postedBy: tx.served_by,
+    lines: [
+      { account_id: cogsAcc, debit: total_cost, credit: 0 },
+      { account_id: inventoryAcc, debit: 0, credit: total_cost },
+    ],
+  });
+}
+
+// Delegates to receipt sub-service — PDF + WhatsApp + email + audit.
+async function sendReceipt(business, transactionId, options, user) {
+  return receiptSvc.sendReceipt(business, transactionId, options || {}, user);
+}
+
+// Convenience — returns a Buffer that the caller can stream as a download.
+async function downloadReceiptPDF(business, transactionId) {
+  return receiptSvc.generatePDF(business, transactionId);
 }
 
 module.exports = {
@@ -294,8 +538,13 @@ module.exports = {
   openSession,
   getSession,
   closeSession,
+  getXReport,
+  getZReport,
+  listSessionsWithVariance,
+  markReconciled,
   createTransaction,
   getTransaction,
   voidTransaction,
   sendReceipt,
+  downloadReceiptPDF,
 };

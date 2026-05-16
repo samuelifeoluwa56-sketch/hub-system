@@ -2,7 +2,7 @@
 
 const express = require("express");
 const router = express.Router();
-const { body, param } = require("express-validator");
+const { body, param, query } = require("express-validator");
 const validate = require("../../middleware/validateBody");
 const { can } = require("../../middleware/permissions");
 const service = require("./pos.service");
@@ -14,6 +14,8 @@ router.get("/terminals", can("pos", "view"), async (req, res, next) => {
     next(e);
   }
 });
+
+// ─── SESSIONS ──────────────────────────────────────────────
 
 router.post(
   "/sessions/open",
@@ -31,6 +33,14 @@ router.post(
     }
   },
 );
+
+router.get("/sessions", can("pos", "view"), async (req, res, next) => {
+  try {
+    res.json(await service.listSessionsWithVariance(req.business, req.query));
+  } catch (e) {
+    next(e);
+  }
+});
 
 router.get(
   "/sessions/:id",
@@ -67,6 +77,63 @@ router.post(
     }
   },
 );
+
+// X report — mid-shift snapshot, no DB writes.
+router.get(
+  "/sessions/:id/x-report",
+  param("id").isUUID(),
+  validate,
+  can("pos", "view"),
+  async (req, res, next) => {
+    try {
+      res.json(await service.getXReport(req.business, req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// Z report — historic totals for a closed session.
+router.get(
+  "/sessions/:id/z-report",
+  param("id").isUUID(),
+  validate,
+  can("pos", "view"),
+  async (req, res, next) => {
+    try {
+      res.json(await service.getZReport(req.business, req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// Reconcile — manager sign-off. Transitions closed → reconciled and
+// locks the session. Permission level is "approve" (not "edit") to
+// keep it firmly with managers / finance, not cashiers.
+router.post(
+  "/sessions/:id/reconcile",
+  param("id").isUUID(),
+  body("sign_off_notes").optional().isString(),
+  validate,
+  can("pos", "approve"),
+  async (req, res, next) => {
+    try {
+      res.json(
+        await service.markReconciled(
+          req.business,
+          req.params.id,
+          req.body,
+          req.user,
+        ),
+      );
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// ─── TRANSACTIONS ──────────────────────────────────────────
 
 router.post(
   "/transactions",
@@ -124,16 +191,46 @@ router.post(
   },
 );
 
+// ─── RECEIPTS ──────────────────────────────────────────────
+
 router.post(
   "/transactions/:id/receipt",
   param("id").isUUID(),
+  body("channel").optional().isIn(["whatsapp", "email", "both", "auto"]),
+  body("overrideTo").optional().isString(),
   validate,
   can("pos", "view"),
   async (req, res, next) => {
     try {
       res.json(
-        await service.sendReceipt(req.business, req.params.id, req.body),
+        await service.sendReceipt(
+          req.business,
+          req.params.id,
+          req.body,
+          req.user,
+        ),
       );
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// Download receipt as PDF — streams to the browser.
+router.get(
+  "/transactions/:id/receipt.pdf",
+  param("id").isUUID(),
+  validate,
+  can("pos", "view"),
+  async (req, res, next) => {
+    try {
+      const pdf = await service.downloadReceiptPDF(req.business, req.params.id);
+      res.set({
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="receipt-${req.params.id}.pdf"`,
+        "Content-Length": pdf.length,
+      });
+      res.send(pdf);
     } catch (e) {
       next(e);
     }

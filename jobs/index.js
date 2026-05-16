@@ -39,13 +39,20 @@ function start() {
     "*/10 * * * *",
     require("./expireReservations"),
   );
-  register("syncCurrencyRates", "0 9 * * 1-5", require("./syncCurrencyRates"));
-  register("syncShopifyStock", "*/15 * * * *", require("./syncShopifyStock"));
   register(
-    "syncWooCommerceStock",
-    "*/15 * * * *",
-    require("./syncWooCommerceStock"),
+    "syncCurrencyRates",
+    "0 9 * * 1-5", 
+    require("./syncCurrencyRates"),
   );
+  register(
+    "syncShopifyStock", "*/15 * * * *",
+    require("./syncShopifyStock"),
+  );
+  // register(
+  //   "syncWooCommerceStock",
+  //   "*/15 * * * *",
+  //   require("./syncWooCommerceStock"),
+  // );
   register(
     "sendScheduledCampaigns",
     "*/5 * * * *",
@@ -68,6 +75,11 @@ function start() {
   );
   register("cleanupSessions", "0 3 * * *", require("./cleanupSessions"));
   register(
+    "expireLoyaltyPoints",
+    "0 2 * * *",
+    require("./expireLoyaltyPoints"),
+  );
+  register(
     "replayFailedWebhooks",
     "*/30 * * * *",
     require("./replayFailedWebhooks"),
@@ -76,6 +88,11 @@ function start() {
     "generateFiscalPeriods",
     "0 0 1 * *",
     require("./generateFiscalPeriods"),
+  );
+  register(
+    "sendpartnerPaymentReminders",
+    "0 0 1 * *",
+    require("./sendPartnerPaymentReminders"),
   );
 
   jobs.forEach(({ name, task }) => {

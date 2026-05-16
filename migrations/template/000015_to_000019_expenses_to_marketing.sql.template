@@ -1,0 +1,455 @@
+-- ============================================================
+-- TEMPLATE — 000015_to_000019_expenses_to_marketing.sql
+--
+-- Placeholders:
+--   {{BUSINESS}}  — new business schema name (lowercase, alnum+underscore)
+--
+-- Covers tables for:
+--   015. expenses (cash_advances, expenses, expense_receipts)
+--   016. payroll  (payroll_runs, payslips, payroll_deductions,
+--                  commission_rules, commission_earned)
+--   017. retail_partners (retail_partners, consignment_stock,
+--                         consignment_sales, partner_settlements)
+--   018. deliveries (deliveries, delivery_items, delivery_tracking,
+--                    delivery_notes, courier_webhooks)
+--   019. marketing  (campaigns, campaign_recipients, campaign_events,
+--                    loyalty_points, loyalty_tiers, dashboard_configs,
+--                    saved_reports)
+--
+-- Applied by scripts/bootstrapBusiness.js
+-- ============================================================
+
+CREATE TABLE {{BUSINESS}}.cash_advances (
+  advance_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id            UUID        NOT NULL REFERENCES shared.staff_profiles (profile_id),
+  purpose               TEXT        NOT NULL,
+  amount_requested      NUMERIC(12,2) NOT NULL CHECK (amount_requested > 0),
+  amount_approved       NUMERIC(12,2),
+  reason                TEXT        NOT NULL,
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','disbursed','settled','cancelled')),
+  outstanding_balance   NUMERIC(12,2) NOT NULL DEFAULT 0,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  disbursed_at          TIMESTAMPTZ,
+  settled_at            TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_cash_advances_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.cash_advances
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_cash_advances_profile ON {{BUSINESS}}.cash_advances (profile_id, status);
+
+CREATE TABLE {{BUSINESS}}.expenses (
+  expense_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_number        TEXT        NOT NULL UNIQUE,
+  profile_id            UUID        NOT NULL REFERENCES shared.staff_profiles (profile_id),
+  expense_type          TEXT        NOT NULL CHECK (expense_type IN ('reimbursement','cash_advance_retirement')),
+  category              TEXT        NOT NULL,
+  -- Categories: transport | office_supplies | client_entertainment | utilities | maintenance | other
+  amount                NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  currency              TEXT        NOT NULL DEFAULT 'NGN',
+  description           TEXT        NOT NULL,
+  expense_date          DATE        NOT NULL,
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','rejected','paid')),
+  receipt_document_id   UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  rejection_reason      TEXT,
+  paid_at               TIMESTAMPTZ,
+  linked_advance_id     UUID        REFERENCES {{BUSINESS}}.cash_advances (advance_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_expenses_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.expenses
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_expenses_profile ON {{BUSINESS}}.expenses (profile_id, status);
+CREATE INDEX idx_{{BUSINESS}}_expenses_status  ON {{BUSINESS}}.expenses (status);
+
+CREATE TABLE {{BUSINESS}}.expense_receipts (
+  receipt_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.expenses (expense_id) ON DELETE CASCADE,
+  document_id           UUID        NOT NULL REFERENCES shared.documents (document_id),
+  receipt_date          DATE,
+  merchant_name         TEXT,
+  amount_on_receipt     NUMERIC(12,2),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_expense_receipts ON {{BUSINESS}}.expense_receipts (expense_id);
+
+
+
+CREATE TABLE {{BUSINESS}}.payroll_runs (
+  run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_number            TEXT        NOT NULL UNIQUE,
+  period_month          SMALLINT    NOT NULL CHECK (period_month BETWEEN 1 AND 12),
+  period_year           SMALLINT    NOT NULL CHECK (period_year >= 2020),
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','under_review','approved','paid')),
+  total_gross           NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_paye            NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_pension_employee NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_pension_employer NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_nhf             NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_deductions      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_net             NUMERIC(14,2) NOT NULL DEFAULT 0,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  paid_at               TIMESTAMPTZ,
+  notes                 TEXT,
+  created_by            UUID        NOT NULL REFERENCES shared.users (user_id),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (period_month, period_year)   -- one run per calendar month
+);
+CREATE TRIGGER trg_{{BUSINESS}}_payroll_runs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.payroll_runs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_payroll_runs_status ON {{BUSINESS}}.payroll_runs (status);
+
+CREATE TABLE {{BUSINESS}}.payslips (
+  payslip_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.payroll_runs (run_id) ON DELETE CASCADE,
+  profile_id            UUID        NOT NULL REFERENCES shared.staff_profiles (profile_id),
+  -- Earnings
+  basic_salary          NUMERIC(12,2) NOT NULL DEFAULT 0,
+  housing_allowance     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  transport_allowance   NUMERIC(12,2) NOT NULL DEFAULT 0,
+  commission_amount     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  other_allowances      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  gross_salary          NUMERIC(12,2) NOT NULL DEFAULT 0,
+  -- Deductions
+  paye_deduction        NUMERIC(12,2) NOT NULL DEFAULT 0,
+  pension_employee      NUMERIC(12,2) NOT NULL DEFAULT 0,   -- 8% employee
+  pension_employer      NUMERIC(12,2) NOT NULL DEFAULT 0,   -- 10% employer
+  nhf_deduction         NUMERIC(12,2) NOT NULL DEFAULT 0,   -- 2.5% of basic
+  advance_recovery      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  other_deductions      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_deductions      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  net_salary            NUMERIC(12,2) NOT NULL DEFAULT 0,
+  -- Attendance
+  days_absent           SMALLINT    NOT NULL DEFAULT 0,
+  leave_days_taken      SMALLINT    NOT NULL DEFAULT 0,
+  -- Generated PDF
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (run_id, profile_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_payslips_run     ON {{BUSINESS}}.payslips (run_id);
+CREATE INDEX idx_{{BUSINESS}}_payslips_profile ON {{BUSINESS}}.payslips (profile_id);
+
+CREATE TABLE {{BUSINESS}}.payroll_deductions (
+  deduction_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  payslip_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.payslips (payslip_id) ON DELETE CASCADE,
+  deduction_type        TEXT        NOT NULL,
+  description           TEXT        NOT NULL,
+  amount                NUMERIC(12,2) NOT NULL CHECK (amount > 0)
+);
+CREATE INDEX idx_{{BUSINESS}}_payroll_deductions ON {{BUSINESS}}.payroll_deductions (payslip_id);
+
+CREATE TABLE {{BUSINESS}}.commission_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id            UUID        REFERENCES shared.staff_profiles (profile_id) ON DELETE CASCADE,
+  role_id               UUID        REFERENCES shared.roles (role_id) ON DELETE CASCADE,
+  rule_type             TEXT        NOT NULL CHECK (rule_type IN ('percentage_of_sales','fixed_per_item','tiered')),
+  rate                  NUMERIC(7,4),
+  tiers                 JSONB,      -- [{min_sales, max_sales, rate}]
+  applicable_to         TEXT        NOT NULL DEFAULT 'all'
+                        CHECK (applicable_to IN ('all','{{BUSINESS}}_only','{{BUSINESS}}_only')),
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT rule_profile_or_role CHECK (
+    (profile_id IS NOT NULL AND role_id IS NULL) OR
+    (profile_id IS NULL AND role_id IS NOT NULL)
+  )
+);
+
+CREATE TABLE {{BUSINESS}}.commission_earned (
+  earned_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id            UUID        NOT NULL REFERENCES shared.staff_profiles (profile_id),
+  rule_id               UUID        REFERENCES {{BUSINESS}}.commission_rules (rule_id) ON DELETE SET NULL,
+  reference_type        TEXT        NOT NULL,  -- 'pos_transaction','sales_order'
+  reference_id          UUID        NOT NULL,
+  sale_amount           NUMERIC(14,2) NOT NULL,
+  commission_amount     NUMERIC(12,2) NOT NULL,
+  period_month          SMALLINT    NOT NULL,
+  period_year           SMALLINT    NOT NULL,
+  payslip_id            UUID        REFERENCES {{BUSINESS}}.payslips (payslip_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_period  ON {{BUSINESS}}.commission_earned (profile_id, period_year, period_month);
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_payslip ON {{BUSINESS}}.commission_earned (payslip_id) WHERE payslip_id IS NOT NULL;
+
+
+
+CREATE TABLE {{BUSINESS}}.retail_partners (
+  partner_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL UNIQUE REFERENCES shared.contacts (contact_id),
+  partner_code          TEXT        NOT NULL UNIQUE,
+  arrangement_type      TEXT        NOT NULL CHECK (arrangement_type IN ('consignment','wholesale','both')),
+  consignment_margin_pct NUMERIC(5,2) DEFAULT 0,
+  wholesale_discount_pct NUMERIC(5,2) DEFAULT 0,
+  payment_terms_days    SMALLINT    NOT NULL DEFAULT 30,
+  settlement_cycle      TEXT        NOT NULL DEFAULT 'monthly'
+                        CHECK (settlement_cycle IN ('weekly','biweekly','monthly')),
+  credit_limit          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  current_balance       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_retail_partners_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.retail_partners
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_retail_partners_code ON {{BUSINESS}}.retail_partners (partner_code);
+
+-- Wire up deferred FK on stock_locations → retail_partners
+ALTER TABLE {{BUSINESS}}.stock_locations
+  ADD CONSTRAINT fk_{{BUSINESS}}_stock_locations_partner
+    FOREIGN KEY (partner_id) REFERENCES {{BUSINESS}}.retail_partners (partner_id) ON DELETE SET NULL;
+
+CREATE TABLE {{BUSINESS}}.consignment_stock (
+  consignment_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id),
+  quantity_sent         INTEGER     NOT NULL CHECK (quantity_sent > 0),
+  quantity_sold         INTEGER     NOT NULL DEFAULT 0,
+  quantity_returned     INTEGER     NOT NULL DEFAULT 0,
+  quantity_outstanding  INTEGER     GENERATED ALWAYS AS
+                          (quantity_sent - quantity_sold - quantity_returned) STORED,
+  agreed_price          NUMERIC(14,2) NOT NULL,
+  sent_date             DATE        NOT NULL DEFAULT CURRENT_DATE,
+  status                TEXT        NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','partially_returned','fully_settled','recalled')),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_consignment_stock_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.consignment_stock
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_consignment_partner ON {{BUSINESS}}.consignment_stock (partner_id, status);
+CREATE INDEX idx_{{BUSINESS}}_consignment_product ON {{BUSINESS}}.consignment_stock (product_id);
+
+CREATE TABLE {{BUSINESS}}.consignment_sales (
+  sale_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  consignment_id        UUID        NOT NULL REFERENCES {{BUSINESS}}.consignment_stock (consignment_id),
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  quantity_sold         INTEGER     NOT NULL CHECK (quantity_sold > 0),
+  sale_price            NUMERIC(14,2) NOT NULL,
+  sale_date             DATE        NOT NULL,
+  notes                 TEXT,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_consignment_sales_partner ON {{BUSINESS}}.consignment_sales (partner_id, sale_date DESC);
+
+CREATE TABLE {{BUSINESS}}.partner_settlements (
+  settlement_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  settlement_number     TEXT        NOT NULL UNIQUE,
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  period_start          DATE        NOT NULL,
+  period_end            DATE        NOT NULL,
+  total_sales_value     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  partner_commission    NUMERIC(12,2) NOT NULL DEFAULT 0,
+  amount_due_to_us      NUMERIC(14,2) NOT NULL DEFAULT 0,
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','sent','paid')),
+  invoice_id            UUID        REFERENCES {{BUSINESS}}.invoices (invoice_id) ON DELETE SET NULL,
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_partner_settlements_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.partner_settlements
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_partner_settlements ON {{BUSINESS}}.partner_settlements (partner_id, status);
+
+
+
+CREATE TABLE {{BUSINESS}}.deliveries (
+  delivery_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_number       TEXT        NOT NULL UNIQUE,
+  reference_type        TEXT        NOT NULL CHECK (reference_type IN ('pos_transaction','sales_order')),
+  reference_id          UUID        NOT NULL,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  delivery_address      JSONB       NOT NULL,  -- {line1, area, city, state, landmark, recipient_name, phone}
+  courier               TEXT        NOT NULL CHECK (courier IN ('chowdeck','gigl','manual')),
+  courier_order_id      TEXT,                  -- Chowdeck / GIGL API reference
+  waybill_number        TEXT,                  -- GIGL waybill
+  status                TEXT        NOT NULL DEFAULT 'pending_dispatch'
+                        CHECK (status IN ('pending_dispatch','dispatched','picked_up',
+                                          'in_transit','delivered','failed','returned')),
+  delivery_fee          NUMERIC(10,2) NOT NULL DEFAULT 0,
+  fee_borne_by          TEXT        NOT NULL DEFAULT 'customer'
+                        CHECK (fee_borne_by IN ('customer','business','split')),
+  dispatched_at         TIMESTAMPTZ,
+  delivered_at          TIMESTAMPTZ,
+  failure_reason        TEXT,
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_deliveries_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.deliveries
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_deliveries_courier_id ON {{BUSINESS}}.deliveries (courier_order_id) WHERE courier_order_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_deliveries_status     ON {{BUSINESS}}.deliveries (status, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_deliveries_contact    ON {{BUSINESS}}.deliveries (contact_id);
+
+CREATE TABLE {{BUSINESS}}.delivery_items (
+  item_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  serial_numbers        TEXT[]      DEFAULT '{}'
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_items ON {{BUSINESS}}.delivery_items (delivery_id);
+
+-- APPEND-ONLY status log
+CREATE TABLE {{BUSINESS}}.delivery_tracking (
+  track_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  status                TEXT        NOT NULL,
+  location              TEXT,
+  message               TEXT,
+  source                TEXT        NOT NULL CHECK (source IN ('chowdeck_webhook','gigl_webhook','manual','system')),
+  raw_payload           JSONB,
+  occurred_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_tracking ON {{BUSINESS}}.delivery_tracking (delivery_id, occurred_at DESC);
+
+CREATE TABLE {{BUSINESS}}.delivery_notes (
+  note_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  content               TEXT        NOT NULL,
+  is_customer_visible   BOOLEAN     NOT NULL DEFAULT false,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE {{BUSINESS}}.courier_webhooks (
+  webhook_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  courier               TEXT        NOT NULL CHECK (courier IN ('chowdeck','gigl')),
+  event_type            TEXT        NOT NULL,
+  payload               JSONB       NOT NULL,
+  delivery_id           UUID        REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE SET NULL,
+  processed             BOOLEAN     NOT NULL DEFAULT false,
+  processed_at          TIMESTAMPTZ,
+  error_message         TEXT,
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_courier_webhooks_delivery    ON {{BUSINESS}}.courier_webhooks (delivery_id)  WHERE delivery_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_courier_webhooks_unprocessed ON {{BUSINESS}}.courier_webhooks (courier, processed, received_at)
+  WHERE processed = false;
+
+
+
+CREATE TABLE {{BUSINESS}}.campaigns (
+  campaign_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_name         TEXT        NOT NULL,
+  campaign_type         TEXT        NOT NULL CHECK (campaign_type IN ('email','whatsapp')),
+  subject_line          TEXT,
+  from_name             TEXT,
+  html_content          TEXT        NOT NULL,
+  audience_filter       JSONB       NOT NULL DEFAULT '{}',
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','queued','sending','sent','paused','cancelled')),
+  scheduled_at          TIMESTAMPTZ,
+  sent_at               TIMESTAMPTZ,
+  recipient_count       INTEGER     NOT NULL DEFAULT 0,
+  delivered_count       INTEGER     NOT NULL DEFAULT 0,
+  opened_count          INTEGER     NOT NULL DEFAULT 0,
+  clicked_count         INTEGER     NOT NULL DEFAULT 0,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_campaigns_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.campaigns
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_campaigns_status ON {{BUSINESS}}.campaigns (status, scheduled_at);
+
+CREATE TABLE {{BUSINESS}}.campaign_recipients (
+  recipient_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.campaigns (campaign_id) ON DELETE CASCADE,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','sent','delivered','opened','clicked','bounced','unsubscribed')),
+  sent_at               TIMESTAMPTZ,
+  opened_at             TIMESTAMPTZ,
+  clicked_at            TIMESTAMPTZ,
+  tracking_token        TEXT        UNIQUE,
+  unsubscribed_at       TIMESTAMPTZ,
+  UNIQUE (campaign_id, contact_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_campaign_recipients_campaign ON {{BUSINESS}}.campaign_recipients (campaign_id, status);
+CREATE INDEX idx_{{BUSINESS}}_campaign_recipients_contact  ON {{BUSINESS}}.campaign_recipients (contact_id);
+CREATE INDEX idx_{{BUSINESS}}_campaign_recipients_token    ON {{BUSINESS}}.campaign_recipients (tracking_token)
+  WHERE tracking_token IS NOT NULL;
+
+CREATE TABLE {{BUSINESS}}.campaign_events (
+  event_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id          UUID        NOT NULL REFERENCES {{BUSINESS}}.campaign_recipients (recipient_id) ON DELETE CASCADE,
+  event_type            TEXT        NOT NULL CHECK (event_type IN ('sent','delivered','opened','clicked','bounced','unsubscribed')),
+  occurred_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  metadata              JSONB       DEFAULT '{}'
+);
+CREATE INDEX idx_{{BUSINESS}}_campaign_events ON {{BUSINESS}}.campaign_events (recipient_id, event_type);
+
+-- APPEND-ONLY loyalty ledger
+CREATE TABLE {{BUSINESS}}.loyalty_points (
+  transaction_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  transaction_type      TEXT        NOT NULL CHECK (transaction_type IN ('earned','redeemed','expired','bonus','adjustment')),
+  points                INTEGER     NOT NULL,  -- positive=earned, negative=redeemed/expired
+  reference_type        TEXT,
+  reference_id          UUID,
+  notes                 TEXT,
+  expires_at            TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_loyalty_points_contact ON {{BUSINESS}}.loyalty_points (contact_id, created_at DESC);
+
+CREATE TABLE {{BUSINESS}}.loyalty_tiers (
+  tier_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tier_name             TEXT        NOT NULL UNIQUE,
+  min_points            INTEGER     NOT NULL DEFAULT 0,
+  max_points            INTEGER,
+  benefits              JSONB       NOT NULL DEFAULT '{}',
+  colour                TEXT        DEFAULT '#64748B',
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE {{BUSINESS}}.dashboard_configs (
+  config_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  dashboard_name        TEXT        NOT NULL,
+  layout                JSONB       NOT NULL DEFAULT '[]',
+  widgets               JSONB       NOT NULL DEFAULT '[]',
+  is_default            BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_dashboard_configs_updated_at BEFORE UPDATE ON {{BUSINESS}}.dashboard_configs FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+CREATE TABLE {{BUSINESS}}.saved_reports (
+  report_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_by            UUID        NOT NULL REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  report_name           TEXT        NOT NULL,
+  report_type           TEXT        NOT NULL,
+  filters               JSONB       NOT NULL DEFAULT '{}',
+  columns               JSONB       NOT NULL DEFAULT '[]',
+  sort_config           JSONB       DEFAULT '{}',
+  is_shared             BOOLEAN     NOT NULL DEFAULT false,
+  schedule              JSONB,      -- {frequency, recipients, format}
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_saved_reports_updated_at BEFORE UPDATE ON {{BUSINESS}}.saved_reports FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+

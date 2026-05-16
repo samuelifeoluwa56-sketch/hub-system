@@ -5,6 +5,7 @@ const router = express.Router();
 const logger = require("../../config/logger");
 const { pool } = require("../../config/db");
 const { emitToBusiness } = require("../../config/sockets");
+const { getActiveBusinesses } = require("../../config/businesses");
 
 router.use(express.json());
 
@@ -42,7 +43,7 @@ router.post("/", async (req, res) => {
     if (!courierId) return;
 
     // Find matching delivery across both business schemas
-    for (const business of ["jewelry", "diffusers"]) {
+    for (const business of getActiveBusinesses()) {
       const {
         rows: [delivery],
       } = await pool.query(

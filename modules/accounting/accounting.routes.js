@@ -14,6 +14,70 @@ router.get("/accounts", can("accounting", "view"), async (req, res, next) => {
     next(e);
   }
 });
+
+// ── Chart of accounts CRUD ───────────────────────────────────
+// Add an account when the business expands its books (e.g. opens a
+// new bank account, adds an expense category). System-seeded accounts
+// (the statutory minimum like sales revenue, VAT payable, PAYE
+// payable) are protected — only their description and is_active flag
+// can be changed.
+router.post(
+  "/accounts",
+  body("account_code").isString().notEmpty(),
+  body("account_name").isString().notEmpty(),
+  body("account_type").isIn([
+    "asset",
+    "liability",
+    "equity",
+    "income",
+    "expense",
+  ]),
+  body("account_subtype").optional().isString(),
+  body("parent_account_id").optional().isUUID(),
+  body("description").optional().isString(),
+  validate,
+  can("accounting", "create"),
+  async (req, res, next) => {
+    try {
+      res
+        .status(201)
+        .json(await service.createAccount(req.business, req.body, req.user));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+router.patch(
+  "/accounts/:id",
+  param("id").isUUID(),
+  body("account_code").optional().isString(),
+  body("account_name").optional().isString(),
+  body("account_type")
+    .optional()
+    .isIn(["asset", "liability", "equity", "income", "expense"]),
+  body("account_subtype").optional().isString(),
+  body("parent_account_id").optional().isUUID(),
+  body("description").optional().isString(),
+  body("is_active").optional().isBoolean(),
+  validate,
+  can("accounting", "edit"),
+  async (req, res, next) => {
+    try {
+      res.json(
+        await service.updateAccount(
+          req.business,
+          req.params.id,
+          req.body,
+          req.user,
+        ),
+      );
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 router.get("/journals", can("accounting", "view"), async (req, res, next) => {
   try {
     res.json(await service.listJournals(req.business, req.query));

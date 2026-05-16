@@ -1,0 +1,121 @@
+-- ============================================================
+-- TEMPLATE — 000010_business_sales.sql
+--
+-- Placeholders:
+--   {{BUSINESS}}  — new business schema name (lowercase, alnum+underscore)
+--
+-- Applied by scripts/bootstrapBusiness.js
+-- ============================================================
+
+-- ┌── JEWELRY ──────────────────────────────────────────────┐
+
+CREATE TABLE {{BUSINESS}}.quotations (
+  quotation_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  quotation_number      TEXT        NOT NULL UNIQUE,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  deal_id               UUID        REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE SET NULL,
+  assigned_to           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','sent','viewed','confirmed','expired','cancelled')),
+  valid_until           DATE        NOT NULL,
+  subtotal              NUMERIC(14,2) NOT NULL DEFAULT 0,
+  discount_total        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  vat_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_amount          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  currency              TEXT        NOT NULL DEFAULT 'NGN',
+  payment_terms         TEXT,
+  notes                 TEXT,
+  terms_conditions      TEXT,
+  sent_at               TIMESTAMPTZ,
+  confirmed_at          TIMESTAMPTZ,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  is_deleted            BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_quotations_updated_at BEFORE UPDATE ON {{BUSINESS}}.quotations FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_quotations_contact ON {{BUSINESS}}.quotations (contact_id);
+CREATE INDEX idx_{{BUSINESS}}_quotations_status  ON {{BUSINESS}}.quotations (status)     WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_quotations_number  ON {{BUSINESS}}.quotations (quotation_number);
+
+CREATE TABLE {{BUSINESS}}.quotation_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  quotation_id          UUID        NOT NULL REFERENCES {{BUSINESS}}.quotations (quotation_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  unit_price            NUMERIC(14,2) NOT NULL,
+  discount_pct          NUMERIC(5,2) NOT NULL DEFAULT 0,
+  discount_amount       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  line_total            NUMERIC(14,2) NOT NULL,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_quotation_lines ON {{BUSINESS}}.quotation_lines (quotation_id);
+
+CREATE TABLE {{BUSINESS}}.sales_orders (
+  order_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_number          TEXT        NOT NULL UNIQUE,
+  quotation_id          UUID        UNIQUE REFERENCES {{BUSINESS}}.quotations (quotation_id),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  status                TEXT        NOT NULL DEFAULT 'confirmed'
+                        CHECK (status IN ('confirmed','partially_fulfilled','fulfilled','cancelled')),
+  fulfilment_type       TEXT        NOT NULL CHECK (fulfilment_type IN ('walk_in','delivery')),
+  total_amount          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  amount_paid           NUMERIC(14,2) NOT NULL DEFAULT 0,
+  amount_outstanding    NUMERIC(14,2) GENERATED ALWAYS AS (total_amount - amount_paid) STORED,
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_sales_orders_updated_at BEFORE UPDATE ON {{BUSINESS}}.sales_orders FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_sales_orders_contact ON {{BUSINESS}}.sales_orders (contact_id);
+CREATE INDEX idx_{{BUSINESS}}_sales_orders_status  ON {{BUSINESS}}.sales_orders (status);
+
+CREATE TABLE {{BUSINESS}}.order_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.sales_orders (order_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  unit_price            NUMERIC(14,2) NOT NULL,
+  line_total            NUMERIC(14,2) NOT NULL,
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','fulfilled','cancelled'))
+);
+CREATE INDEX idx_{{BUSINESS}}_order_lines ON {{BUSINESS}}.order_lines (order_id);
+
+CREATE TABLE {{BUSINESS}}.discounts (
+  discount_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  discount_name         TEXT        NOT NULL,
+  discount_type         TEXT        NOT NULL CHECK (discount_type IN ('percentage','fixed')),
+  value                 NUMERIC(10,4) NOT NULL,
+  applies_to            TEXT        NOT NULL DEFAULT 'all',
+  valid_from            DATE,
+  valid_to              DATE,
+  min_order_value       NUMERIC(14,2),
+  usage_limit           INTEGER,
+  usage_count           INTEGER     NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_by            UUID        REFERENCES shared.users (user_id),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE {{BUSINESS}}.discount_approvals (
+  approval_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  reference_type        TEXT        NOT NULL CHECK (reference_type IN ('pos_transaction','quotation')),
+  reference_id          UUID        NOT NULL,
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id),
+  requested_price       NUMERIC(14,2) NOT NULL,
+  min_price             NUMERIC(14,2) NOT NULL,
+  requested_by          UUID        NOT NULL REFERENCES shared.users (user_id),
+  reviewed_by           UUID        REFERENCES shared.users (user_id),
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','rejected')),
+  review_notes          TEXT,
+  reviewed_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_discount_approvals_status ON {{BUSINESS}}.discount_approvals (status) WHERE status = 'pending';
+
+-- ┌── DIFFUSERS ────────────────────────────────────────────┐

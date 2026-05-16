@@ -47,24 +47,24 @@ router.use(
 
 // ── Protected — shared modules (no business schema needed) ─
 router.use("/contacts", protect, require("../shared/contacts/contacts.routes"));
-// router.use(
-//   "/documents",
-//   protect,
-//   require("../shared/documents/documents.routes"),
-// );
+router.use(
+  "/documents",
+  protect,
+  require("../shared/documents/documents.routes"),
+);
 router.use(
   "/notifications",
   protect,
   require("../shared/notifications/notifications.routes"),
 );
-//router.use("/staff", protect, require("../shared/staff/staff.routes"));
-// router.use(
-//   "/messaging",
-//   protect,
-//   require("../shared/messaging/messaging.routes"),
-// );
-// router.use("/calendar", protect, require("../shared/calendar/calendar.routes"));
-// router.use("/tasks", protect, require("../shared/tasks/tasks.routes"));
+router.use("/staff", protect, require("../shared/staff/staff.routes"));
+router.use(
+  "/messaging",
+  protect,
+  require("../shared/messaging/messaging.routes"),
+);
+router.use("/calendar", protect, require("../shared/calendar/calendar.routes"));
+router.use("/tasks", protect, require("../shared/tasks/tasks.routes"));
 
 // ── Protected — business modules (require business context) ─
 router.use("/crm", protect, require("../modules/crm/crm.routes"));
@@ -97,26 +97,41 @@ router.use(
   protect,
   require("../modules/logistics/logistics.routes"),
 );
-// router.use(
-//   "/retail-partners",
-//   protect,
-//   require("../modules/retail-partners/retail-partners.routes"),
-// );
+router.use(
+  "/catalogue",
+  protect,
+  require("../modules/catalogue/catalogue.routes"),
+);
+router.use(
+  "/retail-partners",
+  protect,
+  require("../modules/retail-partners/retail-partners.routes"),
+);
 router.use(
   "/campaigns",
   protect,
   require("../modules/campaigns/campaigns.routes"),
 );
+router.use("/social", protect, require("../modules/social/social.routes"));
+router.use("/loyalty", protect, require("../modules/loyalty/loyalty.routes"));
 router.use(
   "/dashboards",
   protect,
   require("../modules/dashboards/dashboards.routes"),
 );
-//router.use("/reports", protect, require("../modules/reports/reports.routes"));
-// router.use(
-//   "/settings",
-//   protect,
-//   require("../modules/settings/settings.routes"),
-// );
+router.use("/reports", protect, require("../modules/reports/reports.routes"));
+// Permissions admin — mounted BEFORE /settings so Express matches the
+// more specific path first. The router lives in shared/permissions/
+// because it manages global role definitions, not per-module config.
+router.use(
+  "/settings/permissions",
+  protect,
+  require("../shared/permissions/permissions.routes"),
+);
+router.use(
+  "/settings",
+  protect,
+  require("../modules/settings/settings.routes"),
+);
 
 module.exports = router;

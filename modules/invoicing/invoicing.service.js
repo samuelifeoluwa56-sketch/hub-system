@@ -3,11 +3,14 @@
 const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
 const notifService = require("../../shared/notifications/notifications.service");
 const auditService = require("../../shared/audit/audit.service");
+const journalService = require("../accounting/journal.service");
+const stockService = require("../stock/stock.service");
 const { renderToPDF } = require("../../lib/pdf/generator");
 const { sendWithAttachment } = require("../../lib/email/sender");
 const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
 const logger = require("../../config/logger");
 const repo = require("./invoicing.repository");
+const loyaltyService = require("../loyalty/loyalty.service");
 
 async function list(
   business,
@@ -86,6 +89,17 @@ async function create(business, data, user) {
 
     await postInvoiceJournal(client, business, inv);
 
+    // Post the cost-of-goods-sold journal — relieves Inventory and books
+    // the cost side of the sale to COGS. Without this step the P&L
+    // would show every sale as 100% margin and the Balance Sheet
+    // inventory line would never reduce.
+    //
+    // Skip for credit notes and any non-sale invoice types — there's
+    // no stock movement (and therefore no COGS) on a refund/credit.
+    if (data.invoice_type === "sale" || !data.invoice_type) {
+      await postSaleCOGSJournal(client, business, inv, data.lines);
+    }
+
     await auditService.log(client, {
       userId: user.user_id,
       userName: "staff",
@@ -102,32 +116,120 @@ async function create(business, data, user) {
 }
 
 async function postInvoiceJournal(client, business, invoice) {
-  const ar = await repo.getARAccount(client);
-  const rev = await repo.getRevenueAccount(client);
-  const vat = await repo.getVATAccount(client);
-  if (!ar || !rev) return;
+  // Resolve account IDs through the canonical accounting helper so the
+  // codes are looked up consistently across modules (payroll uses the
+  // same path).
+  //
+  // Chart-of-accounts codes (Nigerian SME convention):
+  //   1310 — Accounts Receivable (asset)
+  //   4100 — Sales Revenue (income)
+  //   2210 — VAT Payable (liability)
+  const ar = await journalService.getAccountId(client, "1310");
+  const rev = await journalService.getAccountId(client, "4100");
+  const vat = await journalService.getAccountId(client, "2210");
 
-  const entry = await repo.insertJournalEntry(client, {
+  // Refuse silently if the COA is mis-seeded — the AR/Revenue pair is
+  // the minimum we need to produce a balanced entry. (VAT is optional;
+  // a zero-VAT invoice still produces a valid two-line entry.)
+  if (!ar || !rev) {
+    logger.warn(
+      `[invoicing] postInvoiceJournal skipped — missing COA accounts: ` +
+        `ar=${ar ? "ok" : "missing 1310"} rev=${rev ? "ok" : "missing 4100"}`,
+    );
+    return;
+  }
+
+  // Build the journal:
+  //   DR Accounts Receivable    total_amount
+  //     CR Sales Revenue        subtotal
+  //     CR VAT Payable          vat_amount   (only if VAT present)
+  //
+  // journalService.postEntry validates DR=CR with a 0.01 tolerance and
+  // stamps the active fiscal period — neither of which the old direct-
+  // insert path did. If the numbers don't balance (e.g. a future bug
+  // changes how subtotal/vat are computed), the post throws and the
+  // surrounding withBusinessContext rolls back the invoice creation.
+  const lines = [
+    { account_id: ar, debit: invoice.total_amount, credit: 0 },
+    { account_id: rev, debit: 0, credit: invoice.subtotal },
+  ];
+  if (vat && parseFloat(invoice.vat_amount || 0) > 0) {
+    lines.push({ account_id: vat, debit: 0, credit: invoice.vat_amount });
+  }
+
+  await journalService.postEntry(client, {
     description: `Invoice ${invoice.invoice_number}`,
+    referenceType: "invoice",
     referenceId: invoice.invoice_id,
-    createdBy: invoice.created_by,
+    postedBy: invoice.created_by,
+    lines,
   });
-  if (!entry) return;
+}
 
-  await repo.insertJournalLines(client, {
-    entryId: entry.entry_id,
-    arId: ar.account_id,
-    totalAmount: invoice.total_amount,
-    revId: rev.account_id,
-    subtotal: invoice.subtotal,
-    vatId: vat?.account_id,
-    vatAmount: invoice.vat_amount,
+async function postSaleCOGSJournal(client, business, invoice, invoiceLines) {
+  // Compute total COGS across all line items at the moment of sale.
+  // calculateSaleCOGS uses weighted-average unit cost from inbound stock
+  // movements (received_from_supplier, transferred_in) and falls back
+  // to products.cost_price when no inbound movements have been recorded.
+  const { total_cost } = await stockService.calculateSaleCOGS(
+    client,
+    invoiceLines.map((l) => ({
+      product_id: l.product_id,
+      quantity: l.quantity,
+    })),
+  );
+
+  // If the catalogue has no cost data at all (every product has
+  // cost_price = 0 and no inbound movements with unit_cost), total
+  // comes back as zero. Skip the entry rather than post a useless
+  // zero-amount journal.
+  if (!total_cost || total_cost <= 0) {
+    logger.warn(
+      `[invoicing] COGS journal skipped for invoice ${invoice.invoice_number}: ` +
+        `no cost data on any line item`,
+    );
+    return;
+  }
+
+  // Chart-of-accounts codes (Nigerian SME convention):
+  //   5000 — Cost of Goods Sold (expense)
+  //   1410 — Stock (current asset) — per-business "Jewelry Stock" /
+  //          "Diffuser Stock" / etc. — the account NAME differs per
+  //          business but the CODE is the same.
+  const cogsAcc = await journalService.getAccountId(client, "5000");
+  const inventoryAcc = await journalService.getAccountId(client, "1410");
+
+  if (!cogsAcc || !inventoryAcc) {
+    logger.warn(
+      `[invoicing] COGS journal skipped for invoice ${invoice.invoice_number}: ` +
+        `missing COA accounts cogs=${cogsAcc ? "ok" : "missing 5000"} ` +
+        `inventory=${inventoryAcc ? "ok" : "missing 1410"}`,
+    );
+    return;
+  }
+
+  //   DR Cost of Goods Sold   total_cost
+  //     CR Stock              total_cost
+  await journalService.postEntry(client, {
+    description: `COGS for Invoice ${invoice.invoice_number}`,
+    referenceType: "invoice_cogs",
+    referenceId: invoice.invoice_id,
+    postedBy: invoice.created_by,
+    lines: [
+      { account_id: cogsAcc, debit: total_cost, credit: 0 },
+      { account_id: inventoryAcc, debit: 0, credit: total_cost },
+    ],
   });
 }
 
 async function recordPayment(business, invoiceId, data, user) {
-  return withBusinessContext(business, async (client) => {
-    const payment = await repo.insertPayment(client, {
+  let contactId = null;
+
+  const payment = await withBusinessContext(business, async (client) => {
+    const inv = await repo.getInvoiceNumberAndContact(client, invoiceId);
+    contactId = inv?.contact_id || null;
+
+    const p = await repo.insertPayment(client, {
       invoiceId,
       payment_date: data.payment_date,
       amount: data.amount,
@@ -146,12 +248,20 @@ async function recordPayment(business, invoiceId, data, user) {
       module: "invoicing",
       action: "create",
       table: "invoice_payments",
-      recordId: payment.payment_id,
-      after: payment,
+      recordId: p.payment_id,
+      after: p,
     });
 
-    return payment;
+    return p;
   });
+
+  if (contactId && data.is_confirmed !== false) {
+    loyaltyService
+      .awardPoints(business, contactId, data.amount, "invoice_payment", payment.payment_id, user)
+      .catch((err) => logger.error("[loyalty] award failed after invoice payment", err));
+  }
+
+  return payment;
 }
 
 async function send(business, invoiceId, { channel = "email" }, user) {

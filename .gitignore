@@ -33,3 +33,8 @@ certs/*.crt
 
 # Test coverage
 coverage/
+audit.md
+schema-two.html
+build_pixie_tech_arch.js
+test-fail.txt
+test-fail2.txt

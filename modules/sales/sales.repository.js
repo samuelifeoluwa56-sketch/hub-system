@@ -197,17 +197,17 @@ async function getOrderProductLines(client, orderId) {
   return rows;
 }
 
-async function reserveStock(client, { product_id, quantity, orderId }) {
-  await client
-    .query(
-      `INSERT INTO stock_reservations
-       (product_id, quantity, reserved_for, expires_at, status)
-     SELECT $1, $2, o.contact_id, now() + INTERVAL '7 days', 'active'
-     FROM sales_orders o WHERE o.order_id = $3`,
-      [product_id, quantity, orderId],
-    )
-    .catch(() => {});
-}
+// NOTE: reserveStock was removed in Sprint 5 polish. It silently
+// swallowed errors via `.catch(() => {})`, which meant orders could
+// quietly fail to reserve stock without anyone noticing. It also
+// didn't check availability before inserting.
+//
+// All callers now go through movementsService.createReservation
+// (modules/stock/movements.service.js) which:
+//   - validates availability with a stock check
+//   - throws a 409 on insufficient stock instead of silently no-op'ing
+//   - emits a socket event for real-time UI updates
+//   - audit-logs the reservation
 
 async function listOrders(client, { status, limit, offset }) {
   const { rows } = await client.query(
@@ -251,7 +251,6 @@ module.exports = {
   insertOrder,
   copyQuotationLinesToOrder,
   getOrderProductLines,
-  reserveStock,
   listOrders,
   findOrderById,
 };

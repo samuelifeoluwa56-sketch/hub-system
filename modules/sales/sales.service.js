@@ -6,6 +6,7 @@ const { sendEmail } = require("../../lib/email/sender");
 const whatsapp = require("../../integrations/messaging/adapters/whatsapp");
 const auditService = require("../../shared/audit/audit.service");
 const crmService = require("../crm/crm.service");
+const movementsService = require("../stock/movements.service");
 const repo = require("./sales.repository");
 
 async function listQuotations(
@@ -195,13 +196,40 @@ async function confirmQuotation(business, quotationId, user) {
     });
     await repo.setQuotationConfirmed(client, quotationId);
 
+    // Reserve stock for each line via movements.service.createReservation.
+    // This replaces the previous direct INSERT in sales.repo.reserveStock,
+    // which silently swallowed errors. The new path:
+    //   - validates availability (throws 409 if short)
+    //   - emits a socket event for real-time stock updates
+    //   - audit-logs the reservation
+    //
+    // If any single line can't be reserved, the whole confirmation
+    // is rolled back (withBusinessContext is transactional), and the
+    // caller sees a clear error message naming the SKU that ran short.
     const lines = await repo.getOrderProductLines(client, order.order_id);
     for (const l of lines) {
-      await repo.reserveStock(client, {
-        product_id: l.product_id,
-        quantity: l.quantity,
-        orderId: order.order_id,
-      });
+      try {
+        await movementsService.createReservation(client, {
+          business,
+          productId: l.product_id,
+          quantity: l.quantity,
+          reservedFor: q.contact_id,
+          // Quotation→Order reservations get a 7-day expiry — same
+          // window the old code used.
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          notes: `Reserved for order ${orderNumber} (quotation confirmation)`,
+          userId: user.user_id,
+        });
+      } catch (err) {
+        // Surface the product context so the error is actionable.
+        // The transaction will roll back automatically.
+        throw Object.assign(
+          new Error(
+            `Cannot confirm quotation — insufficient stock for line item: ${err.message}`,
+          ),
+          { status: err.status || 409 },
+        );
+      }
     }
 
     return order;

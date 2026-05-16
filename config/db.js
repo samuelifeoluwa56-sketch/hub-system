@@ -30,7 +30,12 @@ pool.on("error", (err) => {
 // SET LOCAL means search_path reverts when the transaction ends —
 // safe to reuse the pooled connection across different businesses.
 async function withBusinessContext(business, callback) {
-  if (!config.app.businesses.includes(business)) {
+  // Use the dynamic business cache, not the hardcoded config.app.businesses.
+  // The cache is populated at startup by server.js calling
+  // businesses.loadActiveBusinesses(), and refreshed whenever a business
+  // is created or deactivated.
+  const businesses = require("./businesses"); // lazy — avoids circular import
+  if (!businesses.isValidBusiness(business)) {
     throw new Error(`Invalid business context: ${business}`);
   }
 

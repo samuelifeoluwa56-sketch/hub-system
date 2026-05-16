@@ -1,6 +1,6 @@
 "use strict";
 
-const config = require("../config/config");
+const businesses = require("../config/businesses");
 
 // ── setBusinessContext ────────────────────────────────────
 // Validates the business from the JWT and attaches it to req.
@@ -9,12 +9,18 @@ const config = require("../config/config");
 // withBusinessContext() in db.js — not here.
 // This middleware just validates and exposes req.business
 // so routes can call withBusinessContext(req.business, ...).
+//
+// Validation uses the dynamic cache (config/businesses), which is
+// populated from shared.business_config at boot and refreshed when
+// businesses are added/deactivated. Synchronous read — safe on the
+// hot path.
 function setBusinessContext(req, res, next) {
   const business = req.headers["x-business-line"] || req.user?.current_business;
+  const activeList = businesses.getActiveBusinesses();
 
-  if (!business || !config.app.businesses.includes(business)) {
+  if (!business || !businesses.isValidBusiness(business)) {
     return res.status(400).json({
-      message: `Invalid or missing business context. Must be one of: ${config.app.businesses.join(", ")}`,
+      message: `Invalid or missing business context. Must be one of: ${activeList.join(", ")}`,
     });
   }
 

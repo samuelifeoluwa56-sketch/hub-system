@@ -1,5 +1,7 @@
 "use strict";
 
+const { getActiveBusinesses } = require("../../config/businesses");
+
 async function list(client, { business, search, type, limit, offset }) {
   const { rows } = await client.query(
     `SELECT contact_id, contact_type, display_name, first_name, last_name,
@@ -80,7 +82,7 @@ async function insert(
       email || null,
       priority_level || "regular",
       source || null,
-      visible_to || ["jewelry", "diffusers"],
+      visible_to || getActiveBusinesses(),
       notes || null,
       userId,
     ],

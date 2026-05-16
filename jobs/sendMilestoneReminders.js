@@ -2,10 +2,11 @@
 const { withBusinessContext } = require("../config/db");
 const logger = require("../config/logger");
 const { emitToBusiness } = require("../config/sockets");
+const { getActiveBusinesses } = require("../config/businesses");
 
 // Fire internal notifications for upcoming birthdays/anniversaries
 module.exports = async function sendMilestoneReminders() {
-  for (const business of ["jewelry", "diffusers"]) {
+  for (const business of getActiveBusinesses()) {
     await withBusinessContext(business, async (client) => {
       const { rows } = await client.query(`
         SELECT m.milestone_type, m.milestone_date,

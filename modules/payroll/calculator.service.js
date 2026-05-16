@@ -2,6 +2,7 @@
 
 const { withBusinessContext } = require("../../config/db");
 const { calculateDeductions } = require("./deductions");
+const payrollConfig = require("./config");
 
 /**
  * Calculate payslip figures for a single staff member for a given payroll run period.
@@ -14,6 +15,12 @@ async function calculatePayslip(
   periodYear,
   client,
 ) {
+  // Resolve per-business payroll config (allowance ratios, working days,
+  // advance recovery cap). Today this returns Nigerian defaults; future
+  // wire-up to business_config will let each brand override without
+  // touching this function.
+  const cfg = await payrollConfig.resolveConfig(client, business);
+
   // Get staff base salary from current active contract
   const {
     rows: [profile],
@@ -36,9 +43,14 @@ async function calculatePayslip(
 
   const basicSalary = parseFloat(profile.base_salary);
 
-  // Standard allowances (configurable per business — here using common Nigerian pattern)
-  const housingAllowance = parseFloat((basicSalary * 0.2).toFixed(2)); // 20% of basic
-  const transportAllowance = parseFloat((basicSalary * 0.1).toFixed(2)); // 10% of basic
+  // Standard allowances — ratios come from payroll config so each
+  // business can override without code change.
+  const housingAllowance = parseFloat(
+    (basicSalary * cfg.HOUSING_ALLOWANCE_RATIO).toFixed(2),
+  );
+  const transportAllowance = parseFloat(
+    (basicSalary * cfg.TRANSPORT_ALLOWANCE_RATIO).toFixed(2),
+  );
 
   // Commission earned this period
   const {
@@ -60,7 +72,8 @@ async function calculatePayslip(
     ).toFixed(2),
   );
 
-  // Outstanding cash advances to recover
+  // Outstanding cash advances to recover — capped at the per-business
+  // ratio so staff never receive an unworkable net payslip.
   const {
     rows: [advRow],
   } = await client.query(
@@ -69,13 +82,13 @@ async function calculatePayslip(
      WHERE profile_id=$1 AND status='disbursed'`,
     [profileId],
   );
-  // Recover at most 50% of net salary per month
   const advanceOutstanding = Math.min(
     parseFloat(advRow.total),
-    grossSalary * 0.5,
+    grossSalary * cfg.ADVANCE_RECOVERY_CAP_RATIO,
   );
 
-  // Absent days deduction
+  // Absent days deduction — daily rate from config so 6-day-week
+  // businesses (26 working days) calculate correctly.
   const {
     rows: [absRow],
   } = await client.query(
@@ -89,7 +102,7 @@ async function calculatePayslip(
     [profileId, periodMonth, periodYear],
   );
   const daysAbsent = parseInt(absRow.absent_days);
-  const dailyRate = basicSalary / 22; // Assuming 22 working days
+  const dailyRate = basicSalary / cfg.WORKING_DAYS_PER_MONTH;
   const absentDeduct = parseFloat((daysAbsent * dailyRate).toFixed(2));
 
   const deductions = calculateDeductions({

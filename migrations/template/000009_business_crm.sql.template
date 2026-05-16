@@ -1,0 +1,91 @@
+-- ============================================================
+-- TEMPLATE — 000009_business_crm.sql
+--
+-- Placeholders:
+--   {{BUSINESS}}  — new business schema name (lowercase, alnum+underscore)
+--
+-- Applied by scripts/bootstrapBusiness.js
+-- ============================================================
+
+-- ┌── JEWELRY ──────────────────────────────────────────────┐
+
+CREATE TABLE {{BUSINESS}}.crm_deals (
+  deal_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  assigned_to           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  title                 TEXT        NOT NULL,
+  stage                 TEXT        NOT NULL,   -- must exist in pipeline_stage_defs
+  expected_value        NUMERIC(14,2),
+  probability           SMALLINT    DEFAULT 50 CHECK (probability BETWEEN 0 AND 100),
+  expected_close_date   DATE,
+  source                TEXT,                   -- 'walk_in','referral','social_media','repeat','campaign'
+  lost_reason           TEXT,
+  won_at                TIMESTAMPTZ,
+  lost_at               TIMESTAMPTZ,
+  is_deleted            BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_deals_updated_at BEFORE UPDATE ON {{BUSINESS}}.crm_deals FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_contact  ON {{BUSINESS}}.crm_deals (contact_id);
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_owner    ON {{BUSINESS}}.crm_deals (assigned_to, stage) WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_stage    ON {{BUSINESS}}.crm_deals (stage)              WHERE is_deleted = false;
+
+-- Now add FK on stock_reservations → crm_deals
+ALTER TABLE {{BUSINESS}}.stock_reservations
+  ADD CONSTRAINT fk_{{BUSINESS}}_reservations_deal
+    FOREIGN KEY (crm_deal_id) REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE SET NULL;
+
+CREATE TABLE {{BUSINESS}}.crm_activities (
+  activity_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id               UUID        REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  activity_type         TEXT        NOT NULL,
+  -- Types: call | message | email | store_visit | quotation_sent | invoice_sent
+  --        payment_received | note | stage_change
+  summary               TEXT        NOT NULL,
+  direction             TEXT        CHECK (direction IN ('inbound','outbound')),
+  performed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  performed_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_auto               BOOLEAN     NOT NULL DEFAULT false   -- true if system-generated
+);
+CREATE INDEX idx_{{BUSINESS}}_crm_activities_deal    ON {{BUSINESS}}.crm_activities (deal_id)    WHERE deal_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_activities_contact ON {{BUSINESS}}.crm_activities (contact_id, performed_at DESC);
+
+CREATE TABLE {{BUSINESS}}.crm_notes (
+  note_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id               UUID        REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  content               TEXT        NOT NULL,
+  is_pinned             BOOLEAN     NOT NULL DEFAULT false,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_notes_updated_at BEFORE UPDATE ON {{BUSINESS}}.crm_notes FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+CREATE TABLE {{BUSINESS}}.customer_preferences (
+  preference_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  preference_key        TEXT        NOT NULL,   -- 'ring_size','preferred_metal','budget_range'
+  preference_value      TEXT        NOT NULL,
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (contact_id, preference_key)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_preferences_updated_at BEFORE UPDATE ON {{BUSINESS}}.customer_preferences FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+CREATE TABLE {{BUSINESS}}.customer_milestones (
+  milestone_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  milestone_type        TEXT        NOT NULL CHECK (milestone_type IN ('birthday','wedding_anniversary','business_anniversary','graduation','other')),
+  milestone_date        DATE        NOT NULL,
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_milestones_date ON {{BUSINESS}}.customer_milestones (milestone_date);
+
+-- ┌── DIFFUSERS ────────────────────────────────────────────┐

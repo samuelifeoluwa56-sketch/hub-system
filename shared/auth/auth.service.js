@@ -123,7 +123,7 @@ async function logout(userId, rawRefreshToken) {
 }
 
 async function switchBusiness(userId, business) {
-  if (!config.app.businesses.includes(business))
+  if (!require("../../config/businesses").isValidBusiness(business))
     throw Object.assign(new Error(`Invalid business: ${business}`), {
       status: 400,
     });

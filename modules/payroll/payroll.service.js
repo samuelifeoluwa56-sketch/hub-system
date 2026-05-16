@@ -4,6 +4,7 @@ const { withBusinessContext, nextDocumentNumber } = require("../../config/db");
 const { calculatePayslip } = require("./calculator.service");
 const { renderToPDF } = require("../../lib/pdf/generator");
 const auditService = require("../../shared/audit/audit.service");
+const journalService = require("../accounting/journal.service");
 const logger = require("../../config/logger");
 const repo = require("./payroll.repository");
 
@@ -135,64 +136,84 @@ async function approveRun(business, runId, user) {
 }
 
 async function postPayrollJournal(client, business, runId, run) {
+  // Resolve account IDs via journalService.getAccountId — falls back to
+  // null silently for missing codes; we filter null-account lines below.
   const codeMap = {
-    salaries: "6110",
-    pension_employer: "6120",
-    paye: "2310",
-    pension: "2320",
-    nhf: "2330",
-    bank: "1210",
+    salaries: "6110", // Salaries & Wages expense
+    pension_employer: "6120", // Employer Pension expense
+    paye: "2310", // PAYE Payable (liability)
+    pension: "2320", // Pension Payable (liability)
+    nhf: "2330", // NHF Payable (liability)
+    bank: "1210", // Bank account (asset) — net cash going out
   };
   const accounts = {};
   for (const [key, code] of Object.entries(codeMap)) {
-    const acc = await repo.getCOAAccount(client, code);
-    if (acc) accounts[key] = acc.account_id;
+    accounts[key] = await journalService.getAccountId(client, code);
   }
+
+  // Refuse silently if the COA is mis-seeded — the salary/bank pair is
+  // the minimum we need to produce a balanced entry.
   if (!accounts.salaries || !accounts.bank) return;
 
-  const entryDesc = `Payroll Run ${run.run_number} — ${run.period_month}/${run.period_year}`;
-  const entry = await repo.insertJournalEntry(client, {
-    entryNumber: `JE-PR-${runId.substring(0, 8)}`,
-    description: entryDesc,
-    referenceId: runId,
-    approvedBy: run.approved_by,
-  });
-
-  const lines = [
-    { account: accounts.salaries, debit: run.total_gross, credit: 0 },
-    { account: accounts.paye, debit: 0, credit: run.total_paye },
-    { account: accounts.pension, debit: 0, credit: run.total_pension_employee },
-    { account: accounts.nhf, debit: 0, credit: run.total_nhf },
-    { account: accounts.bank, debit: 0, credit: run.total_net },
-  ];
-  for (const l of lines) {
-    if ((!l.debit && !l.credit) || !l.account) continue;
-    await repo.insertJournalLine(client, {
-      entry_id: entry.entry_id,
-      account_id: l.account,
-      debit: l.debit,
-      credit: l.credit,
-    });
-  }
-
-  if (accounts.pension_employer && run.total_pension_employer > 0) {
-    const entry2 = await repo.insertJournalEntry(client, {
-      entryNumber: `JE-PEN-${runId.substring(0, 8)}`,
-      description: `Employer Pension — ${run.run_number}`,
-      referenceId: runId,
-      approvedBy: run.approved_by,
-    });
-    await repo.insertJournalLine(client, {
-      entry_id: entry2.entry_id,
-      account_id: accounts.pension_employer,
-      debit: run.total_pension_employer,
-      credit: 0,
-    });
-    await repo.insertJournalLine(client, {
-      entry_id: entry2.entry_id,
+  // ── Main payroll journal ────────────────────────────────────────
+  // DR Salaries (gross)
+  //   CR PAYE Payable
+  //   CR Pension Payable (employee portion)
+  //   CR NHF Payable
+  //   CR Bank (net to staff)
+  //
+  // Lines with both debit=0 and credit=0 OR missing account_id are
+  // filtered out so a business that doesn't run NHF (etc.) still
+  // produces a balanced entry.
+  const mainLines = [
+    { account_id: accounts.salaries, debit: run.total_gross, credit: 0 },
+    { account_id: accounts.paye, debit: 0, credit: run.total_paye },
+    {
       account_id: accounts.pension,
       debit: 0,
-      credit: run.total_pension_employer,
+      credit: run.total_pension_employee,
+    },
+    { account_id: accounts.nhf, debit: 0, credit: run.total_nhf },
+    { account_id: accounts.bank, debit: 0, credit: run.total_net },
+  ].filter((l) => l.account_id && (l.debit > 0 || l.credit > 0));
+
+  await journalService.postEntry(client, {
+    description: `Payroll Run ${run.run_number} — ${run.period_month}/${run.period_year}`,
+    referenceType: "payroll_run",
+    referenceId: runId,
+    postedBy: run.approved_by,
+    lines: mainLines,
+  });
+
+  // ── Employer pension journal (separate entry) ──────────────────
+  // The employer's 10% pension contribution is an expense to the
+  // business, posted separately so the main payroll entry stays a
+  // clean "what staff earned vs what staff received" picture.
+  //
+  // DR Employer Pension Expense
+  //   CR Pension Payable
+  if (
+    accounts.pension_employer &&
+    accounts.pension &&
+    run.total_pension_employer > 0
+  ) {
+    await journalService.postEntry(client, {
+      description: `Employer Pension — ${run.run_number}`,
+      referenceType: "payroll_run",
+      referenceId: runId,
+      postedBy: run.approved_by,
+      lines: [
+        {
+          account_id: accounts.pension_employer,
+          debit: run.total_pension_employer,
+          credit: 0,
+        },
+        {
+          account_id: accounts.pension,
+          debit: 0,
+          credit: run.total_pension_employer,
+        },
+      ],
     });
   }
 }
